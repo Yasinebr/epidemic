@@ -1,0 +1,1071 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from pulp import *
+import json
+import itertools
+from tqdm import tqdm
+from weight_sum_module import load_weights
+
+
+class VaccineAllocationOptimizer:
+    """
+    کلاس بهینه‌سازی تخصیص واکسن در شرایط اپیدمی با قابلیت بهینه‌سازی زمان‌بندی
+    """
+
+    def __init__(self, excel_file_path, config_file_path=None, weights_file_path=None):
+        """
+        مقداردهی اولیه با داده‌های فایل اکسل و فایل پیکربندی
+
+        پارامترها:
+            excel_file_path (str): مسیر فایل اکسل حاوی داده‌های اپیدمی
+            config_file_path (str): مسیر فایل پیکربندی JSON (اختیاری)
+            weights_file_path (str): مسیر فایل وزن‌های توابع هدف (اختیاری)
+        """
+        print(f"در حال بارگذاری داده‌های اپیدمی از فایل: {excel_file_path}")
+
+        # بررسی وجود فایل اکسل
+        if not os.path.exists(excel_file_path):
+            raise FileNotFoundError(f"فایل {excel_file_path} یافت نشد.")
+
+        # خواندن داده‌های اپیدمی
+        try:
+            self.data = pd.read_excel(excel_file_path)
+            print(f"داده‌ها با موفقیت بارگذاری شدند. تعداد نقاط زمانی: {len(self.data)}")
+
+            # بررسی وجود ستون‌های مورد نیاز
+            required_columns = ['Time', 'S1', 'I1', 'Q1', 'V11', 'V21', 'R1',
+                                'S2', 'I2', 'Q2', 'V12', 'V22', 'R2']
+
+            missing_columns = [col for col in required_columns if col not in self.data.columns]
+            if missing_columns:
+                raise ValueError(f"ستون‌های مورد نیاز در فایل وجود ندارند: {missing_columns}")
+
+            # نمایش داده‌های اولیه
+            print("\n=== نمونه‌ای از داده‌های اپیدمی (5 نقطه زمانی اول) ===")
+            print(self.data.head())
+
+            # بارگذاری وزن‌های توابع هدف
+            self.w1, self.w2, self.w3, self.weights_valid = load_weights(weights_file_path)
+
+            # آماده‌سازی داده‌ها برای استفاده در مدل
+            self.prepare_data()
+
+            # بارگیری تنظیمات از فایل config.json (اگر ارائه شده باشد)
+            self.config = None
+            if config_file_path:
+                self.load_config(config_file_path)
+                print("تنظیمات زمان‌بندی از فایل پیکربندی بارگذاری شد.")
+            else:
+                print("فایل پیکربندی ارائه نشده است. از زمان‌بندی پیش‌فرض استفاده می‌شود.")
+
+        except Exception as e:
+            print(f"خطا در خواندن فایل اکسل: {e}")
+            raise
+
+    def load_config(self, config_file_path):
+        """
+        بارگیری تنظیمات از فایل JSON
+
+        پارامترها:
+            config_file_path (str): مسیر فایل پیکربندی JSON
+        """
+        if not os.path.exists(config_file_path):
+            raise FileNotFoundError(f"فایل پیکربندی {config_file_path} یافت نشد.")
+
+        try:
+            with open(config_file_path, 'r', encoding='utf-8') as file:
+                self.config = json.load(file)
+
+            # بررسی وجود کلیدهای مورد نیاز
+            required_keys = [
+                "tau1_group1_min", "tau1_group1_max",
+                "tau1_group2_min", "tau1_group2_max",
+                "gap_group1_min", "gap_group1_max",
+                "gap_group2_min", "gap_group2_max",
+                "time_step"
+            ]
+
+            missing_keys = [key for key in required_keys if key not in self.config]
+            if missing_keys:
+                raise ValueError(f"کلیدهای زیر در فایل پیکربندی وجود ندارند: {missing_keys}")
+
+            print("\n=== تنظیمات زمان‌بندی ===")
+            print(
+                f"محدوده شروع دوز اول برای گروه 1: {self.config['tau1_group1_min']} تا {self.config['tau1_group1_max']}")
+            print(
+                f"محدوده شروع دوز اول برای گروه 2: {self.config['tau1_group2_min']} تا {self.config['tau1_group2_max']}")
+            print(
+                f"محدوده فاصله بین دوزها برای گروه 1: {self.config['gap_group1_min']} تا {self.config['gap_group1_max']}")
+            print(
+                f"محدوده فاصله بین دوزها برای گروه 2: {self.config['gap_group2_min']} تا {self.config['gap_group2_max']}")
+            print(f"گام زمانی: {self.config['time_step']}")
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"خطا در خواندن فایل JSON: {e}")
+        except Exception as e:
+            raise Exception(f"خطا در بارگیری تنظیمات: {e}")
+
+    def prepare_data(self):
+        """
+        آماده‌سازی داده‌ها برای استفاده در مدل
+        """
+        print("\nدر حال آماده‌سازی داده‌ها برای استفاده در مدل...")
+
+        # استخراج زمان‌ها
+        self.time_points = self.data['Time'].values
+
+        # تعداد نقاط زمانی
+        self.T = len(self.time_points)
+
+        # تعداد گروه‌ها و تولیدکنندگان
+        self.num_groups = 2
+        self.num_manufacturers = 2
+
+        # داده‌های مربوط به گروه‌ها
+        self.S = [self.data['S1'].values, self.data['S2'].values]  # افراد مستعد
+        self.I = [self.data['I1'].values, self.data['I2'].values]  # افراد آلوده
+        self.Q = [self.data['Q1'].values, self.data['Q2'].values]  # افراد قرنطینه شده
+        self.V1 = [self.data['V11'].values, self.data['V12'].values]  # افراد واکسینه شده (دوز اول)
+        self.V2 = [self.data['V21'].values, self.data['V22'].values]  # افراد واکسینه شده (دوز دوم)
+        self.R = [self.data['R1'].values, self.data['R2'].values]  # افراد بهبود یافته
+
+        # زمان شروع واکسیناسیون دوز اول برای هر گروه (مقادیر پیش‌فرض)
+        self.tau1 = [1, 11]  # زمان شروع واکسیناسیون دوز اول گروه j
+
+        # زمان شروع واکسیناسیون دوز دوم برای هر گروه (مقادیر پیش‌فرض)
+        self.tau2 = [30, 40]  # زمان شروع واکسیناسیون دوز دوم گروه j
+
+        # زمان اتمام اپیدمی
+        self.end_time = [self.T - 1, self.T - 1]  # فرض می‌کنیم آخرین نقطه زمانی، پایان اپیدمی است
+
+        # پارامترهای هزینه - تعدیل شده مطابق با مدل PDF
+        self.P = [10, 12]  # هزینه تأمین هر دوز واکسن از تولیدکننده i
+        self.SC = [170, 130]  # هزینه اجتماعی گروه j - افزایش یافته برای ایجاد تنوع
+        self.Cq = [0, 150]  # هزینه تعطیلی کسب و کار گروه j - کاهش یافته برای ایجاد تنوع
+        self.CV1 = 70  # هزینه ثابت واکسیناسیون دوز اول - تعدیل شده
+        self.CV2 = 50  # هزینه ثابت واکسیناسیون دوز دوم - تعدیل شده
+        self.L = 800  # محدودیت تولید واکسن - کاهش یافته برای ایجاد محدودیت بیشتر
+
+        # پارامترهای تابع هزینه قرنطینه
+        self.A = 10
+        self.B = 50
+
+        # بررسی مقادیر
+        print("\n=== اطلاعات آماده‌سازی شده ===")
+        print(f"تعداد نقاط زمانی: {self.T}")
+        print(f"تعداد گروه‌ها: {self.num_groups}")
+        print(f"تعداد تولیدکنندگان: {self.num_manufacturers}")
+        print(f"زمان شروع واکسیناسیون دوز اول (پیش‌فرض): {self.tau1}")
+        print(f"زمان شروع واکسیناسیون دوز دوم (پیش‌فرض): {self.tau2}")
+        print(f"زمان اتمام اپیدمی: {self.end_time}")
+
+        # بررسی جمعیت‌ها
+        total_pop_group1 = self.S[0][0] + self.I[0][0] + self.Q[0][0] + self.V1[0][0] + self.V2[0][0] + self.R[0][0]
+        total_pop_group2 = self.S[1][0] + self.I[1][0] + self.Q[1][0] + self.V1[1][0] + self.V2[1][0] + self.R[1][0]
+
+        print(f"جمعیت کل گروه 1 (نقطه زمانی اول): {total_pop_group1}")
+        print(f"جمعیت کل گروه 2 (نقطه زمانی اول): {total_pop_group2}")
+
+    def build_model(self, tau1=None, tau2=None):
+        """
+        ساخت مدل بهینه‌سازی
+
+        پارامترها:
+            tau1 (list): زمان‌های شروع واکسیناسیون دوز اول
+            tau2 (list): زمان‌های شروع واکسیناسیون دوز دوم
+        """
+        # در صورت ارائه زمان‌های جدید، آنها را جایگزین مقادیر پیش‌فرض می‌کنیم
+        if tau1 is not None:
+            self.tau1 = tau1
+        if tau2 is not None:
+            self.tau2 = tau2
+
+        print("\nدر حال ساخت مدل بهینه‌سازی...")
+        print(f"زمان‌های استفاده شده برای دوز اول: {self.tau1}")
+        print(f"زمان‌های استفاده شده برای دوز دوم: {self.tau2}")
+
+        # ایجاد مدل
+        self.model = LpProblem("Vaccine_Allocation_Optimization", LpMinimize)
+
+        # متغیرهای تصمیم
+
+        # نسبت واکسن دوز اول تخصیص داده شده به گروه j
+        self.U1 = {}
+        for j in range(1, self.num_groups + 1):
+            self.U1[j] = LpVariable(f"U1_{j}", 0, 1)
+
+        # نسبت واکسن دوز دوم تخصیص داده شده به گروه j
+        self.U2 = {}
+        for j in range(1, self.num_groups + 1):
+            self.U2[j] = LpVariable(f"U2_{j}", 0, 1)
+
+        # تعداد واکسن تولید شده توسط تولیدکننده i
+        self.V_prime = {}
+        for i in range(1, self.num_manufacturers + 1):
+            self.V_prime[i] = LpVariable(f"V_prime_{i}", lowBound=0)
+
+        # محاسبات برای توابع هدف
+
+        # تابع هدف 1: هزینه تأمین واکسن
+        self.objective1 = lpSum(self.P[i - 1] * self.V_prime[i] for i in range(1, self.num_manufacturers + 1))
+
+        # تابع هدف 2: هزینه‌های اجتماعی
+        self.objective2 = 0
+        for j in range(1, self.num_groups + 1):
+            j_idx = j - 1  # اندیس آرایه
+
+            # هزینه اجتماعی قبل از واکسیناسیون
+            social_cost_before_vax = self.SC[j_idx] * sum(self.I[j_idx][t] for t in range(self.tau1[j_idx]))
+
+            # هزینه اجتماعی بین دوز اول و دوم (با کاهش به نسبت واکسیناسیون)
+            total_infected_between_doses = sum(self.I[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
+            social_cost_between_doses = (
+                    self.SC[j_idx] * total_infected_between_doses * (1 - 0.5 * self.U1[j]) +
+                    self.CV1 * self.U1[j]  # تقریب خطی برای U1^2
+            )
+
+            # هزینه اجتماعی پس از دوز دوم (با کاهش به نسبت واکسیناسیون)
+            total_infected_after_dose2 = sum(
+                self.I[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
+            social_cost_after_dose2 = (
+                    self.SC[j_idx] * total_infected_after_dose2 * (1 - 0.8 * self.U2[j]) +
+                    self.CV2 * self.U2[j]  # تقریب خطی برای U2^2
+            )
+
+            # جمع هزینه‌های اجتماعی این گروه
+            self.objective2 += social_cost_before_vax + social_cost_between_doses + social_cost_after_dose2
+
+        # تابع هدف 3: هزینه‌های اقتصادی (فقط برای گروه 2)
+        j = 2  # گروه اولویت دوم (افراد دارای کسب و کار)
+        j_idx = j - 1  # اندیس آرایه
+
+        # محاسبه تعداد کل افراد در مراحل مختلف
+        total_people_before_vax = sum(
+            self.S[j_idx][t] + self.I[j_idx][t] + self.Q[j_idx][t]
+            for t in range(self.tau1[j_idx])
+        )
+
+        total_infected_between_doses = sum(
+            self.I[j_idx][t]
+            for t in range(self.tau1[j_idx], self.tau2[j_idx])
+        )
+
+        total_infected_after_dose2 = sum(
+            self.I[j_idx][t]
+            for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1)
+        )
+
+        # هزینه قرنطینه قبل از واکسیناسیون
+        Cq_before_vax = self.A * self.tau1[j_idx] + self.B
+        economic_cost_before_vax = Cq_before_vax * total_people_before_vax
+
+        # هزینه قرنطینه بین دوز اول و دوم
+        Cq_between_doses = self.A * (self.tau2[j_idx] - self.tau1[j_idx]) + self.B
+        economic_cost_between_doses = Cq_between_doses * total_infected_between_doses * (1 - 0.5 * self.U1[j])
+
+        # هزینه قرنطینه پس از دوز دوم
+        Cq_after_dose2 = self.A * (self.end_time[j_idx] - self.tau2[j_idx]) + self.B
+        economic_cost_after_dose2 = Cq_after_dose2 * total_infected_after_dose2 * (1 - 0.8 * self.U2[j])
+
+        # جمع هزینه‌های اقتصادی
+        self.objective3 = economic_cost_before_vax + economic_cost_between_doses + economic_cost_after_dose2
+
+        # ترکیب توابع هدف با وزن‌های تعیین شده
+        combined_objective = self.w1 * self.objective1 + self.w2 * self.objective2 + self.w3 * self.objective3
+
+        # تنظیم تابع هدف
+        self.model += combined_objective
+
+        # افزودن محدودیت‌ها
+
+        # محدودیت 1: تعادل تولید و مصرف واکسن
+        total_vax_need = 0
+        for j in range(1, self.num_groups + 1):
+            j_idx = j - 1  # اندیس آرایه
+
+            # مجموع افراد مستعد بین زمان شروع دوز اول و دوز دوم
+            total_susceptible = sum(self.S[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
+
+            # مجموع افراد واکسینه شده دوز اول بین زمان شروع دوز دوم و پایان اپیدمی
+            total_vaccinated_dose1 = sum(self.V1[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
+
+            # واکسن مورد نیاز برای این گروه
+            group_vax_need = (
+                    self.U1[j] * total_susceptible +  # نیاز به واکسن دوز اول
+                    self.U2[j] * total_vaccinated_dose1  # نیاز به واکسن دوز دوم
+            )
+
+            total_vax_need += group_vax_need
+
+        # محدودیت تعادل تولید و مصرف
+        self.model += total_vax_need <= lpSum(
+            self.V_prime[i] for i in range(1, self.num_manufacturers + 1)), "Vaccine_Supply_Demand_Balance"
+
+        # محدودیت 2: محدودیت تولید واکسن
+        self.model += lpSum(
+            self.V_prime[i] for i in range(1, self.num_manufacturers + 1)) <= self.L, "Production_Capacity"
+
+        # محدودیت 3: حداقل واکسیناسیون
+        # محدودیت‌ها با توجه به مدل ریاضی PDF تعدیل شده‌اند
+        # حداقل 15% گروه 1 باید دوز اول را دریافت کنند (کاهش از 30%)
+        self.model += self.U1[1] >= 0.15, "Min_Vaccination_Group1_Dose1"
+
+        # حداقل 10% گروه 2 باید دوز اول را دریافت کنند (کاهش از 20%)
+        self.model += self.U1[2] >= 0.10, "Min_Vaccination_Group2_Dose1"
+
+        # حداقل 10% گروه 1 باید دوز دوم را دریافت کنند (کاهش از 20%)
+        self.model += self.U2[1] >= 0.10, "Min_Vaccination_Group1_Dose2"
+
+        # حداقل 5% گروه 2 باید دوز دوم را دریافت کنند (کاهش از 10%)
+        self.model += self.U2[2] >= 0.05, "Min_Vaccination_Group2_Dose2"
+
+        # محدودیت 4: دوز دوم نمی‌تواند از دوز اول بیشتر باشد
+        self.model += self.U2[1] <= self.U1[1], "Dose2_Limit_Group1"
+        self.model += self.U2[2] <= self.U1[2], "Dose2_Limit_Group2"
+
+        print("مدل بهینه‌سازی با موفقیت ساخته شد.")
+
+    def solve_model(self):
+        """
+        حل مدل بهینه‌سازی
+        """
+        print("\nدر حال حل مدل بهینه‌سازی...")
+
+        # حل مدل
+        self.model.solve(PULP_CBC_CMD(msg=False))
+
+        # بررسی وضعیت حل
+        status = LpStatus[self.model.status]
+        print(f"\nوضعیت حل: {status}")
+
+        if self.model.status == LpStatusOptimal:
+            print("مدل با موفقیت حل شد.")
+
+            # نمایش نتایج
+            print("\n=== نتایج بهینه‌سازی ===")
+
+            print("\n--- نسبت واکسن دوز اول تخصیص داده شده به هر گروه ---")
+            for j in range(1, self.num_groups + 1):
+                group_name = "افراد بالای 60 سال" if j == 1 else "افراد دارای کسب و کار"
+                print(f"گروه {j} ({group_name}): {value(self.U1[j]):.4f}")
+
+            print("\n--- نسبت واکسن دوز دوم تخصیص داده شده به هر گروه ---")
+            for j in range(1, self.num_groups + 1):
+                group_name = "افراد بالای 60 سال" if j == 1 else "افراد دارای کسب و کار"
+                print(f"گروه {j} ({group_name}): {value(self.U2[j]):.4f}")
+
+            print("\n--- تعداد واکسن تولید شده توسط هر تولیدکننده ---")
+            for i in range(1, self.num_manufacturers + 1):
+                print(f"تولیدکننده {i}: {value(self.V_prime[i]):.2f}")
+
+            # مقادیر توابع هدف اصلی
+            objective1_value = value(self.objective1)
+            objective2_value = value(self.objective2)
+            objective3_value = value(self.objective3)
+            total_objective_value = value(self.model.objective)
+
+            print("\n--- مقادیر توابع هدف ---")
+            print(f"Z1 (هزینه تأمین واکسن): {objective1_value:.2f} (وزن: {self.w1:.2f})")
+            print(f"Z2 (هزینه‌های اجتماعی): {objective2_value:.2f} (وزن: {self.w2:.2f})")
+            print(f"Z3 (هزینه‌های اقتصادی): {objective3_value:.2f} (وزن: {self.w3:.2f})")
+            print(f"مقدار تابع هدف کل: {total_objective_value:.2f}")
+
+            return {
+                'U1': {j: value(self.U1[j]) for j in range(1, self.num_groups + 1)},
+                'U2': {j: value(self.U2[j]) for j in range(1, self.num_groups + 1)},
+                'V_prime': {i: value(self.V_prime[i]) for i in range(1, self.num_manufacturers + 1)},
+                'objective_value': total_objective_value,
+                'objective1_value': objective1_value,
+                'objective2_value': objective2_value,
+                'objective3_value': objective3_value,
+                'weights': {'w1': self.w1, 'w2': self.w2, 'w3': self.w3},
+                'tau1': self.tau1,
+                'tau2': self.tau2
+            }
+        else:
+            print("مدل به جواب بهینه نرسید.")
+            print("دلیل عدم موفقیت:", LpStatus[self.model.status])
+
+            return None
+
+    def calculate_additional_info(self):
+        """
+        محاسبه اطلاعات تکمیلی و تفسیر نتایج
+        """
+        print("\n=== محاسبات تکمیلی ===")
+
+        # محاسبه کل واکسن مورد نیاز
+        total_vax_need = 0
+        for j in range(1, self.num_groups + 1):
+            j_idx = j - 1  # اندیس آرایه
+
+            # مجموع افراد مستعد بین زمان شروع دوز اول و دوز دوم
+            total_susceptible = sum(self.S[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
+
+            # مجموع افراد واکسینه شده دوز اول بین زمان شروع دوز دوم و پایان اپیدمی
+            total_vaccinated_dose1 = sum(self.V1[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
+
+            # واکسن مورد نیاز برای این گروه
+            group_vax_need = (
+                    value(self.U1[j]) * total_susceptible +  # نیاز به واکسن دوز اول
+                    value(self.U2[j]) * total_vaccinated_dose1  # نیاز به واکسن دوز دوم
+            )
+
+            group_name = "افراد بالای 60 سال" if j == 1 else "افراد دارای کسب و کار"
+            print(f"واکسن مورد نیاز برای گروه {j} ({group_name}):")
+            print(f"  - دوز اول: {value(self.U1[j]) * total_susceptible:.2f}")
+            print(f"  - دوز دوم: {value(self.U2[j]) * total_vaccinated_dose1:.2f}")
+            print(f"  - مجموع: {group_vax_need:.2f}")
+
+            total_vax_need += group_vax_need
+
+        # کل واکسن تولید شده
+        total_production = sum(value(self.V_prime[i]) for i in range(1, self.num_manufacturers + 1))
+
+        print(f"\nکل واکسن مورد نیاز: {total_vax_need:.2f}")
+        print(f"کل واکسن تولید شده: {total_production:.2f}")
+
+        # بررسی استفاده از ظرفیت تولید
+        capacity_usage = total_production / self.L * 100
+        print(f"درصد استفاده از ظرفیت تولید: {capacity_usage:.2f}%")
+
+        # تفسیر نتایج
+        print("\n=== تفسیر نتایج ===")
+
+        # تفسیر اولویت‌بندی گروه‌ها
+        u1_group1 = value(self.U1[1])
+        u1_group2 = value(self.U1[2])
+
+        if u1_group1 > u1_group2:
+            print("گروه 1 (افراد بالای 60 سال) در اولویت بالاتری برای دریافت واکسن دوز اول قرار دارند.")
+        elif u1_group2 > u1_group1:
+            print("گروه 2 (افراد دارای کسب و کار) در اولویت بالاتری برای دریافت واکسن دوز اول قرار دارند.")
+        else:
+            print("هر دو گروه اولویت یکسانی برای دریافت واکسن دوز اول دارند.")
+
+        # تفسیر تولیدکنندگان
+        v_prime_1 = value(self.V_prime[1])
+        v_prime_2 = value(self.V_prime[2])
+
+        if v_prime_1 > v_prime_2:
+            print("تولیدکننده 1 سهم بیشتری در تولید واکسن دارد.")
+        elif v_prime_2 > v_prime_1:
+            print("تولیدکننده 2 سهم بیشتری در تولید واکسن دارد.")
+        else:
+            print("هر دو تولیدکننده سهم یکسانی در تولید واکسن دارند.")
+
+        # تفسیر زمان‌بندی
+        print("\n--- تفسیر زمان‌بندی بهینه ---")
+        print(f"زمان شروع دوز اول برای گروه 1: {self.tau1[0]}")
+        print(f"زمان شروع دوز دوم برای گروه 1: {self.tau2[0]}")
+        print(f"فاصله بین دوزها برای گروه 1: {self.tau2[0] - self.tau1[0]} روز")
+
+        print(f"زمان شروع دوز اول برای گروه 2: {self.tau1[1]}")
+        print(f"زمان شروع دوز دوم برای گروه 2: {self.tau2[1]}")
+        print(f"فاصله بین دوزها برای گروه 2: {self.tau2[1] - self.tau1[1]} روز")
+
+    def visualize_results(self, results):
+        """
+        رسم نمودارهای نتایج با متن فارسی صحیح
+        """
+        if results is None:
+            print("نتایج برای رسم نمودار موجود نیست.")
+            return
+
+        print("\nدر حال رسم نمودارهای نتایج...")
+
+        # کتابخانه‌های مورد نیاز برای اصلاح متن فارسی
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+
+            # تابع کمکی برای اصلاح متن فارسی
+            def fix_farsi_text(text):
+                """اصلاح متن فارسی برای نمایش صحیح در matplotlib"""
+                reshaped_text = arabic_reshaper.reshape(text)
+                bidi_text = get_display(reshaped_text)
+                return bidi_text
+
+            support_farsi = True
+            print("پشتیبانی از متن فارسی فعال شد.")
+
+        except ImportError:
+            # اگر کتابخانه‌ها نصب نشده باشند، از متن انگلیسی استفاده می‌کنیم
+            def fix_farsi_text(text):
+                # جایگزینی متن‌های فارسی با معادل انگلیسی
+                replacements = {
+                    'گروه 1\n(افراد بالای 60 سال)': 'Group 1\n(Elderly, 60+)',
+                    'گروه 2\n(افراد دارای کسب و کار)': 'Group 2\n(Business owners)',
+                    'دوز اول': 'First dose',
+                    'دوز دوم': 'Second dose',
+                    'گروه‌های اولویت': 'Priority Groups',
+                    'نسبت واکسیناسیون': 'Vaccination Ratio',
+                    'نسبت بهینه واکسیناسیون هر گروه': 'Optimal Vaccination Ratio for Each Group',
+                    'تولیدکننده 1': 'Manufacturer 1',
+                    'تولیدکننده 2': 'Manufacturer 2',
+                    'تولیدکنندگان': 'Manufacturers',
+                    'تعداد واکسن': 'Number of Vaccines',
+                    'تعداد بهینه واکسن تولید شده توسط هر تولیدکننده': 'Optimal Number of Vaccines Produced by Each Manufacturer',
+                    'توزیع مصرف واکسن': 'Vaccine Usage Distribution',
+                    'ظرفیت باقیمانده': 'Remaining Capacity',
+                    'توزیع تولید واکسن و ظرفیت باقیمانده': 'Vaccine Production Distribution and Remaining Capacity',
+                    'زمان‌بندی واکسیناسیون': 'Vaccination Schedule',
+                    'زمان (روز)': 'Time (days)',
+                    'زمان‌بندی بهینه واکسیناسیون': 'Optimal Vaccination Schedule'
+                }
+                return replacements.get(text, text)
+
+            support_farsi = False
+            print("هشدار: کتابخانه‌های arabic_reshaper و python-bidi نصب نشده‌اند.")
+            print("برای نمایش صحیح متن فارسی، لطفاً این کتابخانه‌ها را نصب کنید:")
+            print("pip install arabic_reshaper python-bidi")
+            print("از متن انگلیسی به جای فارسی استفاده می‌شود.")
+
+        # نمودار 1: نسبت واکسیناسیون هر گروه
+        plt.figure(figsize=(10, 6))
+        groups = ['گروه 1\n(افراد بالای 60 سال)', 'گروه 2\n(افراد دارای کسب و کار)']
+        fixed_groups = [fix_farsi_text(group) for group in groups]
+
+        # مقادیر
+        values_dose1 = [results['U1'][1], results['U1'][2]]
+        values_dose2 = [results['U2'][1], results['U2'][2]]
+
+        x = np.arange(len(groups))
+        width = 0.35
+
+        bars1 = plt.bar(x - width / 2, values_dose1, width,
+                        label=fix_farsi_text('دوز اول'), color='skyblue')
+        bars2 = plt.bar(x + width / 2, values_dose2, width,
+                        label=fix_farsi_text('دوز دوم'), color='lightgreen')
+
+        plt.xlabel(fix_farsi_text('گروه‌های اولویت'))
+        plt.ylabel(fix_farsi_text('نسبت واکسیناسیون'))
+        plt.title(fix_farsi_text('نسبت بهینه واکسیناسیون هر گروه'))
+        plt.xticks(x, fixed_groups)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # اضافه کردن برچسب روی ستون‌ها
+        def add_labels(bars):
+            for bar in bars:
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width() / 2, height + 0.01,
+                         f'{height:.2%}', ha='center', va='bottom', fontsize=10)
+
+        add_labels(bars1)
+        add_labels(bars2)
+
+        plt.tight_layout()
+        plt.savefig('vaccination_ratio.png')
+        print("نمودار نسبت واکسیناسیون ذخیره شد: vaccination_ratio.png")
+
+        # نمودار 2: تعداد واکسن تولید شده توسط هر تولیدکننده
+        plt.figure(figsize=(8, 6))
+        manufacturers = ['تولیدکننده 1', 'تولیدکننده 2']
+        fixed_manufacturers = [fix_farsi_text(m) for m in manufacturers]
+        values = [results['V_prime'][1], results['V_prime'][2]]
+
+        bars = plt.bar(fixed_manufacturers, values, color=['skyblue', 'lightgreen'])
+        plt.xlabel(fix_farsi_text('تولیدکنندگان'))
+        plt.ylabel(fix_farsi_text('تعداد واکسن'))
+        plt.title(fix_farsi_text('تعداد بهینه واکسن تولید شده توسط هر تولیدکننده'))
+        plt.grid(True, alpha=0.3)
+
+        # اضافه کردن برچسب روی ستون‌ها
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2, height + 5,
+                     f'{height:.1f}', ha='center', va='bottom', fontsize=10)
+
+        plt.tight_layout()
+        plt.savefig('vaccine_production.png')
+        print("نمودار تولید واکسن ذخیره شد: vaccine_production.png")
+
+        # نمودار 3: مقایسه تولید و مصرف واکسن
+        total_vax_need = 0
+        dose1_needs = []
+        dose2_needs = []
+
+        for j in range(1, self.num_groups + 1):
+            j_idx = j - 1  # اندیس آرایه
+
+            # مجموع افراد مستعد بین زمان شروع دوز اول و دوز دوم
+            total_susceptible = sum(self.S[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
+
+            # مجموع افراد واکسینه شده دوز اول بین زمان شروع دوز دوم و پایان اپیدمی
+            total_vaccinated_dose1 = sum(self.V1[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
+
+            # واکسن مورد نیاز برای این گروه
+            dose1_need = results['U1'][j] * total_susceptible
+            dose2_need = results['U2'][j] * total_vaccinated_dose1
+
+            dose1_needs.append(dose1_need)
+            dose2_needs.append(dose2_need)
+
+            total_vax_need += dose1_need + dose2_need
+
+        # کل واکسن تولید شده
+        total_production = sum(results['V_prime'][i] for i in range(1, self.num_manufacturers + 1))
+
+        plt.figure(figsize=(12, 6))
+
+        # نمودار میله‌ای برای مصرف واکسن
+        plt.subplot(1, 2, 1)
+        plt.bar(x - width / 2, dose1_needs, width, label=fix_farsi_text('دوز اول'))
+        plt.bar(x - width / 2, dose2_needs, width, bottom=dose1_needs, label=fix_farsi_text('دوز دوم'))
+        plt.xlabel(fix_farsi_text('گروه‌های اولویت'))
+        plt.ylabel(fix_farsi_text('تعداد واکسن'))
+        plt.title(fix_farsi_text('توزیع مصرف واکسن'))
+        plt.xticks(x, fixed_groups)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # نمودار دایره‌ای برای تولید واکسن
+        plt.subplot(1, 2, 2)
+        pie_labels = [fix_farsi_text('تولیدکننده 1'),
+                      fix_farsi_text('تولیدکننده 2'),
+                      fix_farsi_text('ظرفیت باقیمانده')]
+
+        plt.pie([results['V_prime'][1], results['V_prime'][2], self.L - total_production],
+                labels=pie_labels,
+                autopct='%1.1f%%', startangle=90, colors=['skyblue', 'lightgreen', 'lightgray'])
+        plt.axis('equal')
+        plt.title(fix_farsi_text('توزیع تولید واکسن و ظرفیت باقیمانده'))
+
+        plt.tight_layout()
+        plt.savefig('vaccine_supply_demand.png')
+        print("نمودار تولید و مصرف واکسن ذخیره شد: vaccine_supply_demand.png")
+
+        # نمودار 4: زمان‌بندی واکسیناسیون
+        plt.figure(figsize=(10, 6))
+
+        # محور افقی: روزهای اپیدمی
+        days = np.arange(1, self.T + 1)
+
+        # ایجاد خطوط عمودی برای نشان دادن زمان‌های شروع واکسیناسیون
+        plt.axvline(x=self.tau1[0], color='blue', linestyle='-', alpha=0.5, label=f"τ1_1: {self.tau1[0]}")
+        plt.axvline(x=self.tau2[0], color='blue', linestyle='--', alpha=0.5, label=f"τ2_1: {self.tau2[0]}")
+        plt.axvline(x=self.tau1[1], color='green', linestyle='-', alpha=0.5, label=f"τ1_2: {self.tau1[1]}")
+        plt.axvline(x=self.tau2[1], color='green', linestyle='--', alpha=0.5, label=f"τ2_2: {self.tau2[1]}")
+
+        # رسم منحنی‌های اپیدمی برای هر دو گروه
+        plt.plot(days, self.I[0], 'b-', alpha=0.7, label='موارد آلوده گروه 1')
+        plt.plot(days, self.I[1], 'g-', alpha=0.7, label='موارد آلوده گروه 2')
+
+        plt.xlabel(fix_farsi_text('زمان (روز)'))
+        plt.ylabel('تعداد موارد')
+        plt.title(fix_farsi_text('زمان‌بندی بهینه واکسیناسیون'))
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig('vaccination_schedule.png')
+        print("نمودار زمان‌بندی واکسیناسیون ذخیره شد: vaccination_schedule.png")
+
+    def find_optimal_timing(self):
+        """
+        جستجوی ترکیب بهینه زمان‌های واکسیناسیون
+        """
+        if self.config is None:
+            print("خطا: فایل پیکربندی بارگذاری نشده است. ابتدا فایل config.json را بارگذاری کنید.")
+            return None
+
+        print("\n=== شروع جستجوی زمان‌های بهینه واکسیناسیون ===")
+
+        # استخراج محدوده‌های زمانی از پیکربندی بدون اعمال محدودیت اجباری
+        tau1_1_min = self.config['tau1_group1_min']
+        tau1_1_max = self.config['tau1_group1_max']
+
+        tau1_2_min = self.config['tau1_group2_min']
+        tau1_2_max = self.config['tau1_group2_max']
+
+        # ایجاد محدوده‌های زمانی با استفاده از مقادیر واقعی وارد شده توسط کاربر
+        tau1_1_range = range(tau1_1_min,
+                             tau1_1_max + 1,
+                             self.config['time_step'])
+
+        tau1_2_range = range(tau1_2_min,
+                             tau1_2_max + 1,
+                             self.config['time_step'])
+
+        # متغیرهای نگهداری بهترین نتیجه
+        best_cost = float('inf')
+        best_timing = None
+        best_results = None
+
+        # تعداد کل حالت‌های ممکن
+        total_combinations = 0
+        for tau1_1 in tau1_1_range:
+            tau2_1_min = tau1_1 + self.config['gap_group1_min']
+            tau2_1_max = min(tau1_1 + self.config['gap_group1_max'], self.T - 1)
+
+            for tau2_1 in range(tau2_1_min, tau2_1_max + 1, self.config['time_step']):
+                for tau1_2 in tau1_2_range:
+                    tau2_2_min = tau1_2 + self.config['gap_group2_min']
+                    tau2_2_max = min(tau1_2 + self.config['gap_group2_max'], self.T - 1)
+
+                    for tau2_2 in range(tau2_2_min, tau2_2_max + 1, self.config['time_step']):
+                        if tau2_1 < self.T and tau2_2 < self.T:
+                            total_combinations += 1
+
+        print(f"تعداد کل ترکیب‌های ممکن زمان‌بندی: {total_combinations}")
+
+        # ایجاد نوار پیشرفت
+        with tqdm(total=total_combinations, desc="پیشرفت جستجو") as pbar:
+            # جستجوی تمام ترکیب‌های ممکن
+            for tau1_1 in tau1_1_range:
+                tau2_1_min = tau1_1 + self.config['gap_group1_min']
+                tau2_1_max = min(tau1_1 + self.config['gap_group1_max'], self.T - 1)
+
+                for tau2_1 in range(tau2_1_min, tau2_1_max + 1, self.config['time_step']):
+                    for tau1_2 in tau1_2_range:
+                        tau2_2_min = tau1_2 + self.config['gap_group2_min']
+                        tau2_2_max = min(tau1_2 + self.config['gap_group2_max'], self.T - 1)
+
+                        for tau2_2 in range(tau2_2_min, tau2_2_max + 1, self.config['time_step']):
+                            if tau2_1 >= self.T or tau2_2 >= self.T:
+                                pbar.update(1)
+                                continue
+
+                            # ترکیب زمانی فعلی
+                            current_tau1 = [tau1_1, tau1_2]
+                            current_tau2 = [tau2_1, tau2_2]
+
+                            # ساخت و حل مدل با این زمان‌ها
+                            self.build_model(tau1=current_tau1, tau2=current_tau2)
+                            results = self.solve_model()
+
+                            # بررسی نتایج
+                            if results and results['objective_value'] < best_cost:
+                                best_cost = results['objective_value']
+                                best_timing = {
+                                    'tau1_1': tau1_1,
+                                    'tau2_1': tau2_1,
+                                    'tau1_2': tau1_2,
+                                    'tau2_2': tau2_2
+                                }
+                                best_results = results
+
+                            pbar.update(1)
+
+        if best_timing:
+            print("\n=== زمان‌های بهینه یافت شده ===")
+            print(f"زمان شروع دوز اول برای گروه 1 (τ1_1): {best_timing['tau1_1']}")
+            print(f"زمان شروع دوز دوم برای گروه 1 (τ2_1): {best_timing['tau2_1']}")
+            print(f"فاصله بین دوزها برای گروه 1: {best_timing['tau2_1'] - best_timing['tau1_1']} روز")
+
+            print(f"زمان شروع دوز اول برای گروه 2 (τ1_2): {best_timing['tau1_2']}")
+            print(f"زمان شروع دوز دوم برای گروه 2 (τ2_2): {best_timing['tau2_2']}")
+            print(f"فاصله بین دوزها برای گروه 2: {best_timing['tau2_2'] - best_timing['tau1_2']} روز")
+
+            print(f"هزینه کل با این زمان‌بندی: {best_cost:.2f}")
+
+            # ذخیره نتایج در یک فایل JSON
+            output = {
+                'optimal_timing': best_timing,
+                'optimal_cost': best_cost,
+                'allocation_results': {
+                    'U1': {str(k): v for k, v in best_results['U1'].items()},
+                    'U2': {str(k): v for k, v in best_results['U2'].items()},
+                    'V_prime': {str(k): v for k, v in best_results['V_prime'].items()}
+                }
+            }
+
+            with open('optimal_results.json', 'w', encoding='utf-8') as f:
+                json.dump(output, f, ensure_ascii=False, indent=4)
+
+            print("نتایج بهینه در فایل optimal_results.json ذخیره شد.")
+
+            return best_timing, best_results
+        else:
+            print("هیچ زمان‌بندی بهینه‌ای یافت نشد.")
+            return None
+
+    def run_with_optimal_timing(self):
+        """
+        اجرای مدل با استفاده از زمان‌های بهینه
+        """
+        print("\n=== اجرای مدل با زمان‌های بهینه ===")
+
+        # جستجوی زمان‌های بهینه
+        optimal_timing, _ = self.find_optimal_timing()
+
+        if optimal_timing:
+            # تنظیم زمان‌های بهینه
+            tau1 = [optimal_timing['tau1_1'], optimal_timing['tau1_2']]
+            tau2 = [optimal_timing['tau2_1'], optimal_timing['tau2_2']]
+
+            # اجرای مدل با زمان‌های بهینه
+            self.build_model(tau1=tau1, tau2=tau2)
+            results = self.solve_model()
+
+            if results:
+                # محاسبه اطلاعات تکمیلی
+                self.calculate_additional_info()
+
+                # رسم نمودارها
+                self.visualize_results(results)
+
+                # ذخیره نتایج در فایل JSON
+                self.save_results_to_json(results, "optimal_results.json")
+
+                # نمایش خلاصه نتایج نهایی با زمان‌های بهینه
+                print("\n=== خلاصه نتایج نهایی با زمان‌های بهینه ===")
+                print(f"1. زمان شروع دوز اول برای گروه 1: {tau1[0]}")
+                print(f"2. زمان شروع دوز دوم برای گروه 1: {tau2[0]}")
+                print(f"3. زمان شروع دوز اول برای گروه 2: {tau1[1]}")
+                print(f"4. زمان شروع دوز دوم برای گروه 2: {tau2[1]}")
+                print(f"5. درصد واکسن دز اول مورد نیاز به گروه اول (افراد بالای 60 سال): {results['U1'][1] * 100:.2f}%")
+                print(
+                    f"6. درصد واکسن دز اول مورد نیاز به گروه دوم (افراد دارای کسب و کار): {results['U1'][2] * 100:.2f}%")
+                print(f"7. درصد واکسن دز دوم مورد نیاز به گروه اول (افراد بالای 60 سال): {results['U2'][1] * 100:.2f}%")
+                print(
+                    f"8. درصد واکسن دز دوم مورد نیاز به گروه دوم (افراد دارای کسب و کار): {results['U2'][2] * 100:.2f}%")
+                print(f"9. تعداد واکسن تولید شده توسط تولید کننده اول: {results['V_prime'][1]:.2f}")
+                print(f"10. تعداد واکسن تولید شده توسط تولید کننده دوم: {results['V_prime'][2]:.2f}")
+                print(f"11. هزینه کل: {results['objective_value']:.2f}")
+
+                return results
+            else:
+                print("مدل با زمان‌های بهینه به جواب بهینه نرسید.")
+
+        return None
+
+    def save_results_to_json(self, results, filename):
+        """
+        ذخیره نتایج در فایل JSON
+
+        پارامترها:
+            results (dict): نتایج بهینه‌سازی
+            filename (str): نام فایل خروجی
+        """
+        if results:
+            # تبدیل نتایج به فرمت قابل ذخیره در JSON
+            output = {
+                'optimal_timing': {
+                    'tau1_1': self.tau1[0],
+                    'tau2_1': self.tau2[0],
+                    'tau1_2': self.tau1[1],
+                    'tau2_2': self.tau2[1]
+                },
+                'optimal_cost': results['objective_value'],
+                'objective_components': {
+                    'Z1_supply_cost': results['objective1_value'],
+                    'Z2_social_cost': results['objective2_value'],
+                    'Z3_economic_cost': results['objective3_value']
+                },
+                'weights': results['weights'],
+                'allocation_results': {
+                    'U1': {str(k): v for k, v in results['U1'].items()},
+                    'U2': {str(k): v for k, v in results['U2'].items()},
+                    'V_prime': {str(k): v for k, v in results['V_prime'].items()}
+                }
+            }
+
+            # ذخیره در فایل JSON
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(output, f, ensure_ascii=False, indent=4)
+
+            print(f"نتایج در فایل {filename} ذخیره شدند.")
+
+    def run(self, find_optimal_timing=False):
+        """
+        اجرای کامل فرآیند بهینه‌سازی
+
+        پارامترها:
+            find_optimal_timing (bool): آیا زمان‌های بهینه واکسیناسیون جستجو شود؟
+        """
+        if find_optimal_timing and self.config is not None:
+            # اجرای مدل با جستجوی زمان‌های بهینه
+            return self.run_with_optimal_timing()
+        else:
+            # اجرای معمولی مدل
+            self.build_model()
+            results = self.solve_model()
+
+            # محاسبه اطلاعات تکمیلی و رسم نمودارها
+            if results:
+                self.calculate_additional_info()
+                self.visualize_results(results)
+
+                # ذخیره نتایج
+                self.save_results_to_json(results, "results.json")
+
+                # نمایش خلاصه نتایج
+                print("\n=== خلاصه نتایج نهایی ===")
+                print(f"1. درصد واکسن دز اول مورد نیاز به گروه اول (افراد بالای 60 سال): {results['U1'][1] * 100:.2f}%")
+                print(
+                    f"2. درصد واکسن دز اول مورد نیاز به گروه دوم (افراد دارای کسب و کار): {results['U1'][2] * 100:.2f}%")
+                print(f"3. درصد واکسن دز دوم مورد نیاز به گروه اول (افراد بالای 60 سال): {results['U2'][1] * 100:.2f}%")
+                print(
+                    f"4. درصد واکسن دز دوم مورد نیاز به گروه دوم (افراد دارای کسب و کار): {results['U2'][2] * 100:.2f}%")
+                print(f"5. تعداد واکسن تولید شده توسط تولید کننده اول: {results['V_prime'][1]:.2f}")
+                print(f"6. تعداد واکسن تولید شده توسط تولید کننده دوم: {results['V_prime'][2]:.2f}")
+                print(f"7. هزینه کل: {results['objective_value']:.2f}")
+
+                return results
+
+            return None
+
+
+def main():
+    """
+    تابع اصلی
+    """
+    try:
+        # بررسی و نصب کتابخانه‌های مورد نیاز
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+            print("کتابخانه‌های مورد نیاز برای نمایش متن فارسی نصب شده‌اند.")
+        except ImportError:
+            print("در حال نصب کتابخانه‌های مورد نیاز برای نمایش متن فارسی...")
+            import subprocess
+            subprocess.check_call(['pip', 'install', 'arabic_reshaper', 'python-bidi'])
+            print("کتابخانه‌های مورد نیاز با موفقیت نصب شدند.")
+
+        try:
+            from tqdm import tqdm
+            print("کتابخانه نوار پیشرفت (tqdm) نصب شده است.")
+        except ImportError:
+            print("در حال نصب کتابخانه نوار پیشرفت (tqdm)...")
+            import subprocess
+            subprocess.check_call(['pip', 'install', 'tqdm'])
+            from tqdm import tqdm
+            print("کتابخانه نوار پیشرفت با موفقیت نصب شد.")
+
+        # مسیر فایل اکسل - مسیر را به صورت ثابت تعریف می‌کنیم
+        excel_file = "Group.xlsx"  # فایل باید در همان پوشه‌ای باشد که اسکریپت اجرا می‌شود
+        print(f"استفاده از فایل اکسل: {excel_file}")
+
+        # پرسش در مورد استفاده از فایل پیکربندی
+        use_config = input("آیا می‌خواهید از فایل پیکربندی استفاده کنید؟ (بله/خیر): ").strip().lower()
+
+        config_file = None
+        if use_config in ['بله', 'yes', 'y', '1']:
+            # درخواست مسیر فایل پیکربندی
+            config_file = input("لطفاً مسیر دقیق فایل config.json را وارد کنید: ")
+
+            # بررسی وجود فایل پیکربندی
+            if not os.path.exists(config_file):
+                print(f"خطا: فایل پیکربندی {config_file} یافت نشد.")
+                print("ادامه با تنظیمات پیش‌فرض...")
+                config_file = None
+
+        # پرسش در مورد استفاده از فایل وزن‌ها
+        use_weights = input("آیا می‌خواهید از فایل وزن‌های سفارشی استفاده کنید؟ (بله/خیر): ").strip().lower()
+
+        weights_file = None
+        if use_weights in ['بله', 'yes', 'y', '1']:
+            # درخواست مسیر فایل وزن‌ها
+            weights_file = input("لطفاً مسیر دقیق فایل weights.json را وارد کنید: ")
+
+            # بررسی وجود فایل وزن‌ها
+            if not os.path.exists(weights_file):
+                print(f"خطا: فایل وزن‌ها {weights_file} یافت نشد.")
+                print("ادامه با وزن‌های پیش‌فرض...")
+                weights_file = None
+
+        # بررسی وجود فایل اکسل
+        if not os.path.exists(excel_file):
+            print(f"خطا: فایل {excel_file} یافت نشد.")
+            print(f"لطفاً فایل اکسل خود را با نام '{excel_file}' در همان مسیری که برنامه اجرا می‌شود قرار دهید.")
+            return
+
+        # ایجاد و اجرای بهینه‌ساز
+        optimizer = VaccineAllocationOptimizer(excel_file, config_file, weights_file)
+
+        # پرسش در مورد اجرای جستجوی زمان بهینه
+        find_optimal = False
+        if config_file:
+            find_optimal_input = input("آیا می‌خواهید جستجوی زمان‌های بهینه انجام شود؟ (بله/خیر): ").strip().lower()
+            find_optimal = find_optimal_input in ['بله', 'yes', 'y', '1']
+
+        # پرسش در مورد اجرای متوالی با وزن‌های مختلف
+        run_multiple = input("آیا می‌خواهید الگوریتم را با چند وزن مختلف اجرا کنید؟ (بله/خیر): ").strip().lower()
+
+        if run_multiple in ['بله', 'yes', 'y', '1']:
+            # تعریف چند مجموعه وزن مختلف
+            weight_sets = [
+                {'w1': 0.33, 'w2': 0.33, 'w3': 0.34, 'name': 'وزن متعادل'},
+                {'w1': 0.5, 'w2': 0.25, 'w3': 0.25, 'name': 'تأکید بر هزینه تأمین'},
+                {'w1': 0.25, 'w2': 0.5, 'w3': 0.25, 'name': 'تأکید بر هزینه اجتماعی'},
+                {'w1': 0.25, 'w2': 0.25, 'w3': 0.5, 'name': 'تأکید بر هزینه اقتصادی'}
+            ]
+
+            results_collection = []
+
+            for idx, weight_set in enumerate(weight_sets):
+                print(f"\n\n{'=' * 60}")
+                print(
+                    f"اجرای مدل با {weight_set['name']} (w1={weight_set['w1']}, w2={weight_set['w2']}, w3={weight_set['w3']})")
+                print(f"{'=' * 60}")
+
+                # ایجاد فایل وزن موقت
+                temp_weights_file = f"temp_weights_{idx}.json"
+                with open(temp_weights_file, 'w', encoding='utf-8') as f:
+                    json.dump({'w1': weight_set['w1'], 'w2': weight_set['w2'], 'w3': weight_set['w3']}, f,
+                              ensure_ascii=False)
+
+                # ایجاد و اجرای بهینه‌ساز با وزن‌های جدید
+                temp_optimizer = VaccineAllocationOptimizer(excel_file, config_file, temp_weights_file)
+
+                # اجرای مدل
+                if find_optimal:
+                    result = temp_optimizer.run_with_optimal_timing()
+                else:
+                    result = temp_optimizer.run(find_optimal_timing=False)
+
+                if result:
+                    # ذخیره نتایج با نام متفاوت
+                    temp_optimizer.save_results_to_json(result, f"results_weightset_{idx + 1}.json")
+
+                    # اضافه کردن به مجموعه نتایج
+                    results_collection.append({
+                        'weight_set': weight_set,
+                        'objective_value': result['objective_value'],
+                        'objective1_value': result['objective1_value'],
+                        'objective2_value': result['objective2_value'],
+                        'objective3_value': result['objective3_value'],
+                        'U1_1': result['U1'][1],
+                        'U1_2': result['U1'][2],
+                        'U2_1': result['U2'][1],
+                        'U2_2': result['U2'][2]
+                    })
+
+                # حذف فایل موقت
+                if os.path.exists(temp_weights_file):
+                    os.remove(temp_weights_file)
+
+            # نمایش مقایسه نتایج
+            if results_collection:
+                print("\n\n=== مقایسه نتایج با وزن‌های مختلف ===")
+                print(
+                    "نام مجموعه وزن | هزینه کل | Z1 (تأمین) | Z2 (اجتماعی) | Z3 (اقتصادی) | U1_1 | U1_2 | U2_1 | U2_2")
+                print("-" * 100)
+
+                for result in results_collection:
+                    print(
+                        f"{result['weight_set']['name']} | {result['objective_value']:.2f} | {result['objective1_value']:.2f} | {result['objective2_value']:.2f} | {result['objective3_value']:.2f} | {result['U1_1']:.2f} | {result['U1_2']:.2f} | {result['U2_1']:.2f} | {result['U2_2']:.2f}")
+
+                # ذخیره مقایسه در فایل
+                with open("weight_comparison_results.json", 'w', encoding='utf-8') as f:
+                    json.dump(results_collection, f, ensure_ascii=False, indent=4)
+
+                print("\nمقایسه نتایج در فایل 'weight_comparison_results.json' ذخیره شد.")
+        else:
+            # اجرای عادی مدل
+            optimizer.run(find_optimal_timing=find_optimal)
+
+    except Exception as e:
+        print(f"خطا در اجرای برنامه: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
