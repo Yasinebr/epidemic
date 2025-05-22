@@ -188,7 +188,11 @@ class VaccineAllocationOptimizer:
         print(f"زمان‌های استفاده شده برای دوز اول: {self.tau1}")
         print(f"زمان‌های استفاده شده برای دوز دوم: {self.tau2}")
 
-        # ایجاد مدل
+        # پاک کردن مدل قبلی در صورت وجود
+        if hasattr(self, 'model'):
+            del self.model
+
+        # ایجاد مدل جدید
         self.model = LpProblem("Vaccine_Allocation_Optimization", LpMinimize)
 
         # متغیرهای تصمیم
@@ -301,7 +305,7 @@ class VaccineAllocationOptimizer:
         self.original_objective2 = self.objective2
         self.original_objective3 = self.objective3
 
-        # افزودن محدودیت‌ها
+        # افزودن محدودیت‌ها با نام‌های یکتا
 
         # محدودیت 1: تعادل تولید و مصرف واکسن
         total_vax_need = 0
@@ -330,80 +334,74 @@ class VaccineAllocationOptimizer:
         self.model += lpSum(
             self.V_prime[i] for i in range(1, self.num_manufacturers + 1)) <= self.L, "Production_Capacity"
 
-        # محدودیت 3: حداقل واکسیناسیون - کاهش یافته برای ایجاد تنوع در نتایج
-        # حداقل 5% گروه 1 باید دوز اول را دریافت کنند (کاهش از 15%)
-        self.model += self.U1[1] >= 0.05, "Min_Vaccination_Group1_Dose1"
+        # محدودیت 3: حداقل واکسیناسیون - تعادل قوی‌تر
+        # حداقل 30% گروه 1 باید دوز اول را دریافت کنند (افزایش قابل توجه)
+        self.model += self.U1[1] >= 0.30, "Min_Vaccination_Group1_Dose1_v2"
 
-        # حداقل 5% گروه 2 باید دوز اول را دریافت کنند (کاهش از 10%)
-        self.model += self.U1[2] >= 0.05, "Min_Vaccination_Group2_Dose1"
+        # حداقل 35% گروه 2 باید دوز اول را دریافت کنند (افزایش اما نه خیلی)
+        self.model += self.U1[2] >= 0.35, "Min_Vaccination_Group2_Dose1_v2"
 
-        # حداقل 3% گروه 1 باید دوز دوم را دریافت کنند (کاهش از 10%)
-        self.model += self.U2[1] >= 0.03, "Min_Vaccination_Group1_Dose2"
+        # حداقل 25% گروه 1 باید دوز دوم را دریافت کنند (افزایش قابل توجه)
+        self.model += self.U2[1] >= 0.25, "Min_Vaccination_Group1_Dose2_v2"
 
-        # حداقل 3% گروه 2 باید دوز دوم را دریافت کنند (کاهش از 5%)
-        self.model += self.U2[2] >= 0.03, "Min_Vaccination_Group2_Dose2"
+        # حداقل 30% گروه 2 باید دوز دوم را دریافت کنند (افزایش اما نه خیلی)
+        self.model += self.U2[2] >= 0.30, "Min_Vaccination_Group2_Dose2_v2"
 
-        # محدودیت حداکثر واکسیناسیون برای واقعی‌تر بودن نتایج
-        # حداکثر 80% از هر گروه می‌توانند واکسن دریافت کنند
-        self.model += self.U1[1] <= 0.8, "Max_Vaccination_Group1_Dose1"
-        self.model += self.U1[2] <= 0.8, "Max_Vaccination_Group2_Dose1"
-        self.model += self.U2[1] <= 0.8, "Max_Vaccination_Group1_Dose2"
-        self.model += self.U2[2] <= 0.8, "Max_Vaccination_Group2_Dose2"
+        # محدودیت حداکثر واکسیناسیون - کنترل سخت برای تعادل
+        # گروه 1: حداکثر 50%
+        self.model += self.U1[1] <= 0.50, "Max_Vaccination_Group1_Dose1_v2"
+        self.model += self.U2[1] <= 0.45, "Max_Vaccination_Group1_Dose2_v2"
+
+        # گروه 2: حداکثر 45% (کاهش شدید برای کنترل تعداد واکسن)
+        self.model += self.U1[2] <= 0.45, "Max_Vaccination_Group2_Dose1_v2"
+        self.model += self.U2[2] <= 0.40, "Max_Vaccination_Group2_Dose2_v2"
 
         # محدودیت 4: دوز دوم نمی‌تواند از دوز اول بیشتر باشد
-        self.model += self.U2[1] <= self.U1[1], "Dose2_Limit_Group1"
-        self.model += self.U2[2] <= self.U1[2], "Dose2_Limit_Group2"
+        self.model += self.U2[1] <= self.U1[1], "Dose2_Limit_Group1_v2"
+        self.model += self.U2[2] <= self.U1[2], "Dose2_Limit_Group2_v2"
 
         # محدودیت 5: هر تولیدکننده باید سهم مناسبی از کل تولید را داشته باشد
         # هر تولیدکننده باید حداقل 40% و حداکثر 60% از کل تولید را داشته باشد
         total_production = lpSum(self.V_prime[i] for i in range(1, self.num_manufacturers + 1))
-        self.model += self.V_prime[1] >= 0.4 * total_production, "Min_Producer1"
-        self.model += self.V_prime[1] <= 0.6 * total_production, "Max_Producer1"
-        self.model += self.V_prime[2] >= 0.4 * total_production, "Min_Producer2"
-        self.model += self.V_prime[2] <= 0.6 * total_production, "Max_Producer2"
+        self.model += self.V_prime[1] >= 0.4 * total_production, "Min_Producer1_v2"
+        self.model += self.V_prime[1] <= 0.6 * total_production, "Max_Producer1_v2"
+        self.model += self.V_prime[2] >= 0.4 * total_production, "Min_Producer2_v2"
+        self.model += self.V_prime[2] <= 0.6 * total_production, "Max_Producer2_v2"
 
-        # محدودیت 6: عدالت تخصیص واکسن بین دو گروه (تغییر اساسی)
-        # محاسبه کل افراد مستعد در هر گروه
+        # محدودیت 6: کنترل سخت نسبت واکسیناسیون برای تعادل واقعی
+        # گروه 2 در اولویت اما با نسبت کنترل شده
+        self.model += self.U1[2] >= 1.2 * self.U1[1], "Priority_Group2_Dose1_v2"
+        self.model += self.U2[2] >= 1.2 * self.U2[1], "Priority_Group2_Dose2_v2"
+
+        # محدودیت سخت: گروه 2 نباید بیش از 2.5 برابر گروه 1 واکسن دریافت کند
+        self.model += self.U1[2] <= 2.5 * self.U1[1], "Max_Ratio_Group2_Dose1_v2"
+        self.model += self.U2[2] <= 2.5 * self.U2[1], "Max_Ratio_Group2_Dose2_v2"
+
+        # محدودیت مطلق برای کنترل تعداد واکسن
+        # محاسبه تقریبی کل افراد مستعد هر گروه
         total_susceptible_group1 = sum(self.S[0][t] for t in range(self.tau1[0], self.tau2[0]))
         total_susceptible_group2 = sum(self.S[1][t] for t in range(self.tau1[1], self.tau2[1]))
 
-        # محاسبه کل افراد واکسینه شده دوز اول در هر گروه
-        total_vaccinated_dose1_group1 = sum(self.V1[0][t] for t in range(self.tau2[0], self.end_time[0] + 1))
-        total_vaccinated_dose1_group2 = sum(self.V1[1][t] for t in range(self.tau2[1], self.end_time[1] + 1))
+        # محدودیت مطلق: تعداد واکسن گروه 2 نباید بیش از 3 برابر گروه 1 باشد
+        if total_susceptible_group1 > 0 and total_susceptible_group2 > 0:
+            self.model += (self.U1[2] * total_susceptible_group2) <= 3.0 * (
+                        self.U1[1] * total_susceptible_group1), "Absolute_Limit_Dose1_v2"
 
-        # محاسبه جمعیت کل هر گروه (برای قید متناسب با جمعیت)
-        total_pop_group1 = self.S[0][0] + self.I[0][0] + self.Q[0][0] + self.V1[0][0] + self.V2[0][0] + self.R[0][0]
-        total_pop_group2 = self.S[1][0] + self.I[1][0] + self.Q[1][0] + self.V1[1][0] + self.V2[1][0] + self.R[1][0]
-        total_population = total_pop_group1 + total_pop_group2
+        # حداقل حفاظت قوی برای گروه 1
+        self.model += self.U1[1] >= 0.30, "Min_Protection_Group1_Dose1_v2"  # افزایش به 30%
+        self.model += self.U2[1] >= 0.25, "Min_Protection_Group1_Dose2_v2"  # افزایش به 25%
 
-        # اولویت‌بندی بر اساس کنترل انتشار ویروس:
-        # گروه 2 (افراد دارای کسب و کار) که بیشترین تماس اجتماعی را دارند، در اولویت اول هستند
-        # گروه 1 (سالمندان) نیز واکسن دریافت می‌کنند اما در اولویت دوم
+        # محدودیت بالای گروه 2 برای کنترل بیشتر
+        self.model += self.U1[2] <= 0.45, "Max_Allocation_Group2_Dose1_v2"  # کاهش به 45%
+        self.model += self.U2[2] <= 0.40, "Max_Allocation_Group2_Dose2_v2"  # کاهش به 40%
 
-        # قید ساده برای اولویت کنترل انتشار: گروه 2 باید بیشتر از گروه 1 واکسن دریافت کند
-        # اما نه خیلی بیشتر تا مدل قابل حل بماند
-        self.model += self.U1[2] >= self.U1[1], "Transmission_Priority_Dose1_Simple"
-        self.model += self.U2[2] >= self.U2[1], "Transmission_Priority_Dose2_Simple"
+        # محدودیت بالای گروه 1
+        self.model += self.U1[1] <= 0.50, "Max_Allocation_Group1_Dose1_v2"
+        self.model += self.U2[1] <= 0.45, "Max_Allocation_Group1_Dose2_v2"
 
-        # حداقل حفاظت برای گروه 1: باید حداقل 5% واکسن دریافت کنند
-        self.model += self.U1[1] >= 0.05, "Min_Protection_Group1_Dose1"
-        self.model += self.U2[1] >= 0.03, "Min_Protection_Group1_Dose2"
-
-        # حداقل تخصیص برای گروه 2 برای کنترل انتشار
-        self.model += self.U1[2] >= 0.05, "Min_Transmission_Control_Group2_Dose1"
-        self.model += self.U2[2] >= 0.03, "Min_Transmission_Control_Group2_Dose2"
-
-        # محدودیت حداکثر برای واقعی بودن (کاهش از 80% به 70% برای انعطاف بیشتر)
-        self.model += self.U1[1] <= 0.7, "Max_Vaccination_Group1_Dose1"
-        self.model += self.U1[2] <= 0.7, "Max_Vaccination_Group2_Dose1"
-        self.model += self.U2[1] <= 0.7, "Max_Vaccination_Group1_Dose2"
-        self.model += self.U2[2] <= 0.7, "Max_Vaccination_Group2_Dose2"
-
-        # محدودیت تعادل عمومی: هیچ گروه بیشتر از 2 برابر گروه دیگر واکسن نگیرد
-        self.model += self.U1[1] <= 2 * self.U1[2], "Balance_Group1_Dose1"
-        self.model += self.U1[2] <= 2 * self.U1[1], "Balance_Group2_Dose1"
-        self.model += self.U2[1] <= 2 * self.U2[2], "Balance_Group1_Dose2"
-        self.model += self.U2[2] <= 2 * self.U2[1], "Balance_Group2_Dose2"
+        # محدودیت اختلاف کنترل شده
+        self.model += self.U1[2] <= self.U1[1] + 0.15, "Controlled_Diff_Dose1_v2"  # حداکثر 15% اختلاف
+        self.model += self.U2[2] <= self.U2[1] + 0.15, "Controlled_Diff_Dose2_v2"  # حداکثر 15% اختلاف
 
         print("مدل بهینه‌سازی با موفقیت ساخته شد.")
 
