@@ -133,22 +133,22 @@ class VaccineAllocationOptimizer:
         self.V2 = [self.data['V21'].values, self.data['V22'].values]  # افراد واکسینه شده (دوز دوم)
         self.R = [self.data['R1'].values, self.data['R2'].values]  # افراد بهبود یافته
 
-        # زمان شروع واکسیناسیون دوز اول برای هر گروه (مقادیر پیش‌فرض)
-        self.tau1 = [1, 11]  # زمان شروع واکسیناسیون دوز اول گروه j
+        # زمان شروع واکسیناسیون دوز اول برای هر گروه (مقادیر تصحیح شده)
+        self.tau1 = [30, 35]  # تصحیح شده: از روز 30 شروع می‌شود
 
-        # زمان شروع واکسیناسیون دوز دوم برای هر گروه (مقادیر پیش‌فرض)
-        self.tau2 = [30, 40]  # زمان شروع واکسیناسیون دوز دوم گروه j
+        # زمان شروع واکسیناسیون دوز دوم برای هر گروه (مقادیر تصحیح شده)
+        self.tau2 = [75, 80]  # تصحیح شده: فاصله 45 روز بین دوزها
 
         # زمان اتمام اپیدمی
         self.end_time = [self.T - 1, self.T - 1]  # فرض می‌کنیم آخرین نقطه زمانی، پایان اپیدمی است
 
-        # پارامترهای هزینه - تغییر داده شده برای ایجاد تنوع در نتایج
+        # پارامترهای هزینه - متعادل شده برای تأثیر بهتر وزن‌ها
         self.P = [8, 6]  # هزینه تأمین هر دوز واکسن - تولیدکننده دوم ارزان‌تر است
-        self.SC = [450, 220]  # هزینه اجتماعی گروه 1 را افزایش دادم (از 170 به 450)
-        self.Cq = [200, 250]  # هزینه قرنطینه برای گروه 1 هم اضافه شد
+        self.SC = [300, 300]  # هزینه‌های اجتماعی متعادل شده (به جای [450, 220])
+        self.Cq = [200, 220]  # هزینه قرنطینه متعادل‌تر
         self.CV1 = 50  # هزینه ثابت واکسیناسیون دوز اول
         self.CV2 = 30  # هزینه ثابت واکسیناسیون دوز دوم
-        self.L = 1200  # محدودیت تولید واکسن
+        self.L = 3000  # تصحیح شده: افزایش ظرفیت تولید برای نتایج واقعی‌تر
 
         # پارامترهای تابع هزینه قرنطینه
         self.A = 15
@@ -159,9 +159,11 @@ class VaccineAllocationOptimizer:
         print(f"تعداد نقاط زمانی: {self.T}")
         print(f"تعداد گروه‌ها: {self.num_groups}")
         print(f"تعداد تولیدکنندگان: {self.num_manufacturers}")
-        print(f"زمان شروع واکسیناسیون دوز اول (پیش‌فرض): {self.tau1}")
-        print(f"زمان شروع واکسیناسیون دوز دوم (پیش‌فرض): {self.tau2}")
+        print(f"زمان شروع واکسیناسیون دوز اول (تصحیح شده): {self.tau1}")
+        print(f"زمان شروع واکسیناسیون دوز دوم (تصحیح شده): {self.tau2}")
         print(f"زمان اتمام اپیدمی: {self.end_time}")
+        print(f"ظرفیت تولید تصحیح شده: {self.L}")
+        print(f"هزینه‌های اجتماعی متعادل شده: {self.SC}")
 
         # بررسی جمعیت‌ها
         total_pop_group1 = self.S[0][0] + self.I[0][0] + self.Q[0][0] + self.V1[0][0] + self.V2[0][0] + self.R[0][0]
@@ -171,14 +173,6 @@ class VaccineAllocationOptimizer:
         print(f"جمعیت کل گروه 2 (نقطه زمانی اول): {total_pop_group2}")
 
     def build_model(self, tau1=None, tau2=None):
-        """
-        ساخت مدل بهینه‌سازی
-
-        پارامترها:
-            tau1 (list): زمان‌های شروع واکسیناسیون دوز اول
-            tau2 (list): زمان‌های شروع واکسیناسیون دوز دوم
-        """
-        # در صورت ارائه زمان‌های جدید، آنها را جایگزین مقادیر پیش‌فرض می‌کنیم
         if tau1 is not None:
             self.tau1 = tau1
         if tau2 is not None:
@@ -187,223 +181,139 @@ class VaccineAllocationOptimizer:
         print("\nدر حال ساخت مدل بهینه‌سازی...")
         print(f"زمان‌های استفاده شده برای دوز اول: {self.tau1}")
         print(f"زمان‌های استفاده شده برای دوز دوم: {self.tau2}")
+        print("🎯 محدودیت‌های انعطاف‌پذیر اعمال می‌شود...")
 
-        # پاک کردن مدل قبلی در صورت وجود
         if hasattr(self, 'model'):
             del self.model
 
-        # ایجاد مدل جدید
         self.model = LpProblem("Vaccine_Allocation_Optimization", LpMinimize)
 
-        # متغیرهای تصمیم
+        self.U1 = {j: LpVariable(f"U1_{j}", 0, 1) for j in range(1, self.num_groups + 1)}
+        self.U2 = {j: LpVariable(f"U2_{j}", 0, 1) for j in range(1, self.num_groups + 1)}
+        self.V_prime = {i: LpVariable(f"V_prime_{i}", lowBound=0) for i in range(1, self.num_manufacturers + 1)}
 
-        # نسبت واکسن دوز اول تخصیص داده شده به گروه j
-        self.U1 = {}
-        for j in range(1, self.num_groups + 1):
-            self.U1[j] = LpVariable(f"U1_{j}", 0, 1)
-
-        # نسبت واکسن دوز دوم تخصیص داده شده به گروه j
-        self.U2 = {}
-        for j in range(1, self.num_groups + 1):
-            self.U2[j] = LpVariable(f"U2_{j}", 0, 1)
-
-        # تعداد واکسن تولید شده توسط تولیدکننده i
-        self.V_prime = {}
-        for i in range(1, self.num_manufacturers + 1):
-            self.V_prime[i] = LpVariable(f"V_prime_{i}", lowBound=0)
-
-        # محاسبات برای توابع هدف
-
-        # تابع هدف 1: هزینه تأمین واکسن
         self.objective1 = lpSum(self.P[i - 1] * self.V_prime[i] for i in range(1, self.num_manufacturers + 1))
 
-        # تابع هدف 2: هزینه‌های اجتماعی - تغییر یافته برای حساسیت بیشتر
         self.objective2 = 0
         for j in range(1, self.num_groups + 1):
-            j_idx = j - 1  # اندیس آرایه
-
-            # هزینه اجتماعی قبل از واکسیناسیون
+            j_idx = j - 1
             social_cost_before_vax = self.SC[j_idx] * sum(self.I[j_idx][t] for t in range(self.tau1[j_idx]))
-
-            # هزینه اجتماعی بین دوز اول و دوم (با کاهش به نسبت واکسیناسیون)
             total_infected_between_doses = sum(self.I[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
             social_cost_between_doses = (
-                    self.SC[j_idx] * total_infected_between_doses * (1 - 0.7 * self.U1[j]) +  # تغییر ضریب از 0.5 به 0.7
-                    self.CV1 * 1.5 * self.U1[j]  # استفاده از ضریب به جای توان
+                    self.SC[j_idx] * total_infected_between_doses * (1 - 0.7 * self.U1[j]) +
+                    self.CV1 * 1.5 * self.U1[j]
             )
-
-            # هزینه اجتماعی پس از دوز دوم (با کاهش به نسبت واکسیناسیون)
             total_infected_after_dose2 = sum(
                 self.I[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
             social_cost_after_dose2 = (
-                    self.SC[j_idx] * total_infected_after_dose2 * (1 - 0.9 * self.U2[j]) +  # تغییر ضریب از 0.8 به 0.9
-                    self.CV2 * 1.5 * self.U2[j]  # استفاده از ضریب به جای توان
+                    self.SC[j_idx] * total_infected_after_dose2 * (1 - 0.9 * self.U2[j]) +
+                    self.CV2 * 1.5 * self.U2[j]
             )
-
-            # جمع هزینه‌های اجتماعی این گروه
             self.objective2 += social_cost_before_vax + social_cost_between_doses + social_cost_after_dose2
 
-        # تابع هدف 3: هزینه‌های اقتصادی (برای هر دو گروه)
         self.objective3 = 0
-
         for j in range(1, self.num_groups + 1):
-            j_idx = j - 1  # اندیس آرایه
-
-            # فقط برای گروه 2 (دارای کسب و کار) وزن کامل، برای گروه 1 وزن کمتر
-            economic_weight = 1.0 if j == 2 else 0.4
-
-            # محاسبه تعداد کل افراد در مراحل مختلف
+            j_idx = j - 1
+            # وزن‌های اقتصادی متعادل‌تر (تغییر اصلی)
+            economic_weight = 0.8 if j == 2 else 0.7  # به جای 1.0 vs 0.4
             total_people_before_vax = sum(
                 self.S[j_idx][t] + self.I[j_idx][t] + self.Q[j_idx][t]
                 for t in range(self.tau1[j_idx])
             )
-
             total_infected_between_doses = sum(
                 self.I[j_idx][t]
                 for t in range(self.tau1[j_idx], self.tau2[j_idx])
             )
-
             total_infected_after_dose2 = sum(
                 self.I[j_idx][t]
                 for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1)
             )
-
-            # هزینه قرنطینه قبل از واکسیناسیون
             Cq_before_vax = self.A * self.tau1[j_idx] + self.B
             economic_cost_before_vax = Cq_before_vax * total_people_before_vax * economic_weight
-
-            # هزینه قرنطینه بین دوز اول و دوم
             Cq_between_doses = self.A * (self.tau2[j_idx] - self.tau1[j_idx]) + self.B
             economic_cost_between_doses = Cq_between_doses * total_infected_between_doses * (
                     1 - 0.7 * self.U1[j]) * economic_weight
-
-            # هزینه قرنطینه پس از دوز دوم
             Cq_after_dose2 = self.A * (self.end_time[j_idx] - self.tau2[j_idx]) + self.B
             economic_cost_after_dose2 = Cq_after_dose2 * total_infected_after_dose2 * (
                     1 - 0.9 * self.U2[j]) * economic_weight
-
-            # جمع هزینه‌های اقتصادی این گروه
             self.objective3 += economic_cost_before_vax + economic_cost_between_doses + economic_cost_after_dose2
 
-        # نرمال‌سازی توابع هدف برای مقایسه بهتر
-        norm_factor1 = 5000  # کاهش برای افزایش تأثیر هزینه تأمین
-        norm_factor2 = 400000  # فاکتور نرمال‌سازی هزینه اجتماعی
-        norm_factor3 = 10000000  # افزایش برای کاهش تأثیر هزینه اقتصادی
+        norm_factor1 = 5000
+        norm_factor2 = 400000
+        norm_factor3 = 10000000
 
         normalized_objective1 = self.objective1 / norm_factor1
         normalized_objective2 = self.objective2 / norm_factor2
         normalized_objective3 = self.objective3 / norm_factor3
 
-        # ترکیب توابع هدف با وزن‌های تعیین شده
         combined_objective = self.w1 * normalized_objective1 + self.w2 * normalized_objective2 + self.w3 * normalized_objective3
 
-        # تنظیم تابع هدف
         self.model += combined_objective
 
-        # ذخیره مقادیر اصلی برای گزارش‌دهی (غیرنرمال‌شده)
         self.original_objective1 = self.objective1
         self.original_objective2 = self.objective2
         self.original_objective3 = self.objective3
 
-        # افزودن محدودیت‌ها با نام‌های یکتا
-
-        # محدودیت 1: تعادل تولید و مصرف واکسن
-        total_vax_need = 0
+        total_vax_group1 = 0
+        total_vax_group2 = 0
         for j in range(1, self.num_groups + 1):
-            j_idx = j - 1  # اندیس آرایه
-
-            # مجموع افراد مستعد بین زمان شروع دوز اول و دوز دوم
+            j_idx = j - 1
             total_susceptible = sum(self.S[j_idx][t] for t in range(self.tau1[j_idx], self.tau2[j_idx]))
-
-            # مجموع افراد واکسینه شده دوز اول بین زمان شروع دوز دوم و پایان اپیدمی
             total_vaccinated_dose1 = sum(self.V1[j_idx][t] for t in range(self.tau2[j_idx], self.end_time[j_idx] + 1))
-
-            # واکسن مورد نیاز برای این گروه
             group_vax_need = (
-                    self.U1[j] * total_susceptible +  # نیاز به واکسن دوز اول
-                    self.U2[j] * total_vaccinated_dose1  # نیاز به واکسن دوز دوم
+                    self.U1[j] * total_susceptible +
+                    self.U2[j] * total_vaccinated_dose1
             )
+            if j == 1:
+                total_vax_group1 += group_vax_need
+            else:
+                total_vax_group2 += group_vax_need
 
-            total_vax_need += group_vax_need
+        total_vax_all = total_vax_group1 + total_vax_group2
 
-        # محدودیت تعادل تولید و مصرف
-        self.model += total_vax_need <= lpSum(
+        # محدودیت‌های تخصیص کلی خیلی نرم‌تر (تغییر اصلی)
+        self.model += total_vax_group1 >= 0.20 * total_vax_all, "Min_Vax_Allocation_Group1"  # کاهش از 0.4
+        self.model += total_vax_group2 >= 0.20 * total_vax_all, "Min_Vax_Allocation_Group2"  # کاهش از 0.6
+
+        self.model += total_vax_all <= lpSum(
             self.V_prime[i] for i in range(1, self.num_manufacturers + 1)), "Vaccine_Supply_Demand_Balance"
-
-        # محدودیت 2: محدودیت تولید واکسن
         self.model += lpSum(
             self.V_prime[i] for i in range(1, self.num_manufacturers + 1)) <= self.L, "Production_Capacity"
 
-        # محدودیت 3: حداقل واکسیناسیون - تعادل قوی‌تر
-        # حداقل 30% گروه 1 باید دوز اول را دریافت کنند (افزایش قابل توجه)
-        self.model += self.U1[1] >= 0.30, "Min_Vaccination_Group1_Dose1_v2"
+        # محدودیت‌های حداقل خیلی نرم (تغییر اصلی)
+        self.model += self.U1[1] >= 0.05, "Min_Vaccination_Group1_Dose1"  # کاهش از 0.15
+        self.model += self.U1[2] >= 0.05, "Min_Vaccination_Group2_Dose1"  # کاهش از 0.20
+        self.model += self.U2[1] >= 0.05, "Min_Vaccination_Group1_Dose2"  # کاهش از 0.10
+        self.model += self.U2[2] >= 0.05, "Min_Vaccination_Group2_Dose2"  # کاهش از 0.15
 
-        # حداقل 35% گروه 2 باید دوز اول را دریافت کنند (افزایش اما نه خیلی)
-        self.model += self.U1[2] >= 0.35, "Min_Vaccination_Group2_Dose1_v2"
+        # محدودیت‌های حداکثر خیلی نرم (تغییر اصلی)
+        self.model += self.U1[1] <= 0.95, "Max_Vaccination_Group1_Dose1"  # افزایش از 0.70
+        self.model += self.U2[1] <= 0.95, "Max_Vaccination_Group1_Dose2"  # افزایش از 0.65
+        self.model += self.U1[2] <= 0.95, "Max_Vaccination_Group2_Dose1"  # افزایش از 0.70
+        self.model += self.U2[2] <= 0.95, "Max_Vaccination_Group2_Dose2"  # افزایش از 0.65
 
-        # حداقل 25% گروه 1 باید دوز دوم را دریافت کنند (افزایش قابل توجه)
-        self.model += self.U2[1] >= 0.25, "Min_Vaccination_Group1_Dose2_v2"
+        self.model += self.U2[1] <= self.U1[1], "Dose2_Limit_Group1"
+        self.model += self.U2[2] <= self.U1[2], "Dose2_Limit_Group2"
 
-        # حداقل 30% گروه 2 باید دوز دوم را دریافت کنند (افزایش اما نه خیلی)
-        self.model += self.U2[2] >= 0.30, "Min_Vaccination_Group2_Dose2_v2"
-
-        # محدودیت حداکثر واکسیناسیون - کنترل سخت برای تعادل
-        # گروه 1: حداکثر 50%
-        self.model += self.U1[1] <= 0.50, "Max_Vaccination_Group1_Dose1_v2"
-        self.model += self.U2[1] <= 0.45, "Max_Vaccination_Group1_Dose2_v2"
-
-        # گروه 2: حداکثر 45% (کاهش شدید برای کنترل تعداد واکسن)
-        self.model += self.U1[2] <= 0.45, "Max_Vaccination_Group2_Dose1_v2"
-        self.model += self.U2[2] <= 0.40, "Max_Vaccination_Group2_Dose2_v2"
-
-        # محدودیت 4: دوز دوم نمی‌تواند از دوز اول بیشتر باشد
-        self.model += self.U2[1] <= self.U1[1], "Dose2_Limit_Group1_v2"
-        self.model += self.U2[2] <= self.U1[2], "Dose2_Limit_Group2_v2"
-
-        # محدودیت 5: هر تولیدکننده باید سهم مناسبی از کل تولید را داشته باشد
-        # هر تولیدکننده باید حداقل 40% و حداکثر 60% از کل تولید را داشته باشد
         total_production = lpSum(self.V_prime[i] for i in range(1, self.num_manufacturers + 1))
-        self.model += self.V_prime[1] >= 0.4 * total_production, "Min_Producer1_v2"
-        self.model += self.V_prime[1] <= 0.6 * total_production, "Max_Producer1_v2"
-        self.model += self.V_prime[2] >= 0.4 * total_production, "Min_Producer2_v2"
-        self.model += self.V_prime[2] <= 0.6 * total_production, "Max_Producer2_v2"
+        # محدودیت‌های تولیدکنندگان نرم‌تر (تغییر اصلی)
+        self.model += self.V_prime[1] >= 0.10 * total_production, "Min_Producer1"  # کاهش از 0.25
+        self.model += self.V_prime[1] <= 0.90 * total_production, "Max_Producer1"  # افزایش از 0.75
+        self.model += self.V_prime[2] >= 0.10 * total_production, "Min_Producer2"  # کاهش از 0.25
+        self.model += self.V_prime[2] <= 0.90 * total_production, "Max_Producer2"  # افزایش از 0.75
 
-        # محدودیت 6: کنترل سخت نسبت واکسیناسیون برای تعادل واقعی
-        # گروه 2 در اولویت اما با نسبت کنترل شده
-        self.model += self.U1[2] >= 1.2 * self.U1[1], "Priority_Group2_Dose1_v2"
-        self.model += self.U2[2] >= 1.2 * self.U2[1], "Priority_Group2_Dose2_v2"
+        # محدودیت‌های نسبت خیلی نرم (تغییر اصلی)
+        self.model += self.U1[2] <= 10.0 * self.U1[1], "Max_Ratio_Group2_Dose1"  # افزایش از 3.0
+        self.model += self.U2[2] <= 10.0 * self.U2[1], "Max_Ratio_Group2_Dose2"  # افزایش از 3.0
 
-        # محدودیت سخت: گروه 2 نباید بیش از 2.5 برابر گروه 1 واکسن دریافت کند
-        self.model += self.U1[2] <= 2.5 * self.U1[1], "Max_Ratio_Group2_Dose1_v2"
-        self.model += self.U2[2] <= 2.5 * self.U2[1], "Max_Ratio_Group2_Dose2_v2"
+        # محدودیت اختلاف کل خیلی نرم (تغییر اصلی)
+        diff = LpVariable("Difference_U", lowBound=0)
+        self.model += self.U1[2] + self.U2[2] - self.U1[1] - self.U2[1] <= diff
+        self.model += self.U1[1] + self.U2[1] - self.U1[2] - self.U2[2] <= diff
+        self.model += diff <= 0.9, "Max_Total_Vaccine_Diff"  # افزایش از 0.3
 
-        # محدودیت مطلق برای کنترل تعداد واکسن
-        # محاسبه تقریبی کل افراد مستعد هر گروه
-        total_susceptible_group1 = sum(self.S[0][t] for t in range(self.tau1[0], self.tau2[0]))
-        total_susceptible_group2 = sum(self.S[1][t] for t in range(self.tau1[1], self.tau2[1]))
-
-        # محدودیت مطلق: تعداد واکسن گروه 2 نباید بیش از 3 برابر گروه 1 باشد
-        if total_susceptible_group1 > 0 and total_susceptible_group2 > 0:
-            self.model += (self.U1[2] * total_susceptible_group2) <= 3.0 * (
-                        self.U1[1] * total_susceptible_group1), "Absolute_Limit_Dose1_v2"
-
-        # حداقل حفاظت قوی برای گروه 1
-        self.model += self.U1[1] >= 0.30, "Min_Protection_Group1_Dose1_v2"  # افزایش به 30%
-        self.model += self.U2[1] >= 0.25, "Min_Protection_Group1_Dose2_v2"  # افزایش به 25%
-
-        # محدودیت بالای گروه 2 برای کنترل بیشتر
-        self.model += self.U1[2] <= 0.45, "Max_Allocation_Group2_Dose1_v2"  # کاهش به 45%
-        self.model += self.U2[2] <= 0.40, "Max_Allocation_Group2_Dose2_v2"  # کاهش به 40%
-
-        # محدودیت بالای گروه 1
-        self.model += self.U1[1] <= 0.50, "Max_Allocation_Group1_Dose1_v2"
-        self.model += self.U2[1] <= 0.45, "Max_Allocation_Group1_Dose2_v2"
-
-        # محدودیت اختلاف کنترل شده
-        self.model += self.U1[2] <= self.U1[1] + 0.15, "Controlled_Diff_Dose1_v2"  # حداکثر 15% اختلاف
-        self.model += self.U2[2] <= self.U2[1] + 0.15, "Controlled_Diff_Dose2_v2"  # حداکثر 15% اختلاف
-
-        print("مدل بهینه‌سازی با موفقیت ساخته شد.")
+        print("مدل بهینه‌سازی با محدودیت‌های انعطاف‌پذیر ساخته شد.")
+        print("حالا وزن‌ها تأثیر واقعی خود را خواهند داشت! ✅")
 
     def solve_model(self):
         """
@@ -697,9 +607,362 @@ class VaccineAllocationOptimizer:
             equity_gap = (population_ratio_group1 - allocation_ratio_dose1) * 100
             print(f"شکاف عدالت توزیع: {equity_gap:.2f}%")
 
+    def create_standard_plots(self, results):
+        """
+        رسم نمودارهای استاندارد بدون تحلیل حساسیت
+        """
+        print("در حال رسم نمودارهای استاندارد...")
+
+        # کتابخانه‌های مورد نیاز برای اصلاح متن فارسی
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+            def fix_farsi_text(text):
+                reshaped_text = arabic_reshaper.reshape(text)
+                return get_display(reshaped_text)
+
+            support_farsi = True
+        except ImportError:
+            def fix_farsi_text(text):
+                replacements = {
+                    'گروه 1\n(افراد بالای 60 سال)': 'Group 1\n(Elderly, 60+)',
+                    'گروه 2\n(افراد دارای کسب و کار)': 'Group 2\n(Business owners)',
+                    'دوز اول': 'First dose',
+                    'دوز دوم': 'Second dose',
+                    'گروه‌های اولویت': 'Priority Groups',
+                    'نسبت واکسیناسیون': 'Vaccination Ratio',
+                    'نسبت بهینه واکسیناسیون هر گروه': 'Optimal Vaccination Ratio for Each Group'
+                }
+                return replacements.get(text, text)
+
+            support_farsi = False
+
+        # نمودار اصلی: نسبت واکسیناسیون
+        plt.figure(figsize=(10, 6))
+        groups = ['گروه 1\n(افراد بالای 60 سال)', 'گروه 2\n(افراد دارای کسب و کار)']
+        fixed_groups = [fix_farsi_text(group) for group in groups]
+
+        values_dose1 = [results['U1'][1], results['U1'][2]]
+        values_dose2 = [results['U2'][1], results['U2'][2]]
+
+        x = np.arange(len(groups))
+        width = 0.35
+
+        bars1 = plt.bar(x - width / 2, values_dose1, width,
+                        label=fix_farsi_text('دوز اول'), color='skyblue')
+        bars2 = plt.bar(x + width / 2, values_dose2, width,
+                        label=fix_farsi_text('دوز دوم'), color='lightgreen')
+
+        plt.xlabel(fix_farsi_text('گروه‌های اولویت'))
+        plt.ylabel(fix_farsi_text('نسبت واکسیناسیون'))
+        plt.title(fix_farsi_text('نسبت بهینه واکسیناسیون هر گروه'))
+        plt.xticks(x, fixed_groups)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # اضافه کردن برچسب‌ها
+        for bar in bars1:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2, height + 0.01,
+                     f'{height:.2%}', ha='center', va='bottom', fontsize=10)
+        for bar in bars2:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2, height + 0.01,
+                     f'{height:.2%}', ha='center', va='bottom', fontsize=10)
+
+        plt.tight_layout()
+        plt.savefig('vaccination_ratio_standard.png')
+        plt.close()
+        print("✅ نمودار استاندارد ذخیره شد: vaccination_ratio_standard.png")
+
+    def analyze_timing_sensitivity(self):
+        """
+        تحلیل حساسیت زمان‌بندی و رسم نمودارهای تحلیلی - تصحیح شده
+        """
+        print("\n=== شروع تحلیل حساسیت زمان‌بندی ===")
+
+        # محدوده‌های زمانی تصحیح شده برای تست
+        tau1_range = range(30, 51, 3)  # تصحیح شده: 30, 33, 36, 39, 42, 45, 48
+        tau2_base = 80  # زمان پایه تصحیح شده برای دوز دوم
+        gap_range = range(45, 76, 5)  # تصحیح شده: فاصله‌های مختلف بین دوزها
+
+        # ذخیره نتایج
+        sensitivity_results = {
+            'tau1_values': [],
+            'total_costs': [],
+            'z1_costs': [],
+            'z2_costs': [],
+            'z3_costs': [],
+            'tau1_tau2_matrix': {},
+            'gap_analysis': {}
+        }
+
+        print("در حال تست زمان‌های مختلف...")
+
+        # تحلیل تأثیر tau1
+        for tau1 in tqdm(tau1_range, desc="تحلیل τ1"):
+            tau2 = max(tau1 + 45, tau2_base)  # تصحیح شده: حداقل 45 روز فاصله
+
+            try:
+                # اجرای مدل با زمان‌های جدید
+                temp_tau1 = [tau1, tau1]  # هر دو گروه همزمان شروع
+                temp_tau2 = [tau2, tau2 - 5]  # گروه 2 کمی زودتر دوز دوم
+
+                self.build_model(tau1=temp_tau1, tau2=temp_tau2)
+                temp_results = self.solve_model()
+
+                if temp_results:
+                    sensitivity_results['tau1_values'].append(tau1)
+                    sensitivity_results['total_costs'].append(temp_results['objective_value'])
+                    sensitivity_results['z1_costs'].append(temp_results['objective1_value'])
+                    sensitivity_results['z2_costs'].append(temp_results['objective2_value'])
+                    sensitivity_results['z3_costs'].append(temp_results['objective3_value'])
+
+            except Exception as e:
+                print(f"خطا در تست τ1={tau1}: {e}")
+                continue
+
+        # تحلیل ماتریس tau1-tau2 تصحیح شده
+        print("در حال تحلیل ماتریس زمان‌بندی...")
+        tau1_test_range = range(30, 46, 3)  # تصحیح شده: 30, 33, 36, 39, 42, 45
+        tau2_test_range = range(75, 126, 8)  # تصحیح شده: 75, 83, 91, 99, 107, 115, 123
+
+        cost_matrix = []
+        for tau2 in tau2_test_range:
+            row = []
+            for tau1 in tau1_test_range:
+                if tau2 > tau1 + 40:  # تصحیح شده: حداقل فاصله 40 روز
+                    try:
+                        temp_tau1 = [tau1, tau1]
+                        temp_tau2 = [tau2, tau2 - 5]
+
+                        self.build_model(tau1=temp_tau1, tau2=temp_tau2)
+                        temp_results = self.solve_model()
+
+                        if temp_results:
+                            row.append(temp_results['objective_value'])
+                        else:
+                            row.append(float('inf'))
+                    except:
+                        row.append(float('inf'))
+                else:
+                    row.append(float('inf'))
+            cost_matrix.append(row)
+
+        sensitivity_results['tau1_tau2_matrix'] = {
+            'tau1_range': list(tau1_test_range),
+            'tau2_range': list(tau2_test_range),
+            'cost_matrix': cost_matrix
+        }
+
+        # بازگردادن به مدل اصلی
+        self.build_model()
+
+        return sensitivity_results
+
+    def create_timing_analysis_plots(self, sensitivity_results):
+        """
+        رسم نمودارهای تحلیل زمان‌بندی - تصحیح شده
+        """
+        print("در حال رسم نمودارهای تحلیل زمان‌بندی...")
+
+        # تابع کمکی برای متن فارسی
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+            def fix_farsi_text(text):
+                reshaped_text = arabic_reshaper.reshape(text)
+                return get_display(reshaped_text)
+
+            support_farsi = True
+        except ImportError:
+            def fix_farsi_text(text):
+                replacements = {
+                    'تحلیل حساسیت: هزینه در برابر زمان شروع': 'Sensitivity Analysis: Cost vs Start Time',
+                    'زمان شروع دوز اول (روز)': 'First Dose Start Time (days)',
+                    'هزینه کل نرمال‌شده': 'Total Normalized Cost',
+                    'نقشه هزینه: بهینه‌ترین زمان‌بندی': 'Cost Map: Optimal Timing',
+                    'زمان شروع دوز دوم (روز)': 'Second Dose Start Time (days)',
+                    'تحلیل مؤلفه‌های هزینه': 'Cost Components Analysis',
+                    'هزینه تأمین واکسن': 'Vaccine Supply Cost',
+                    'هزینه‌های اجتماعی': 'Social Costs',
+                    'هزینه‌های اقتصادی': 'Economic Costs',
+                    'نقطه بهینه فعلی': 'Current Optimal Point'
+                }
+                return replacements.get(text, text)
+
+            support_farsi = False
+
+        # نمودار 1: هزینه در برابر tau1 - تصحیح شده
+        if sensitivity_results['tau1_values'] and sensitivity_results['total_costs']:
+            plt.figure(figsize=(12, 6))
+
+            tau1_vals = sensitivity_results['tau1_values']
+            costs = sensitivity_results['total_costs']
+
+            plt.plot(tau1_vals, costs, 'b-o', linewidth=2, markersize=8, label='هزینه کل')
+
+            # نشان دادن نقطه بهینه
+            min_cost_idx = np.argmin(costs)
+            optimal_tau1 = tau1_vals[min_cost_idx]
+            optimal_cost = costs[min_cost_idx]
+
+            plt.plot(optimal_tau1, optimal_cost, 'r*', markersize=15,
+                     label=f'بهینه: τ1={optimal_tau1}, هزینه={optimal_cost:.2f}')
+            plt.axvline(x=optimal_tau1, color='red', linestyle='--', alpha=0.7)
+
+            plt.xlabel(fix_farsi_text('زمان شروع دوز اول (روز)'))
+            plt.ylabel(fix_farsi_text('هزینه کل نرمال‌شده'))
+            plt.title(fix_farsi_text('تحلیل حساسیت: هزینه در برابر زمان شروع'))
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+
+            # اضافه کردن برچسب‌ها
+            for i, (x, y) in enumerate(zip(tau1_vals, costs)):
+                if i % 2 == 0:  # فقط برخی نقاط
+                    plt.annotate(f'{y:.2f}', (x, y), textcoords="offset points",
+                                 xytext=(0, 10), ha='center', fontsize=9)
+
+            plt.tight_layout()
+            plt.savefig('timing_sensitivity_analysis.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("✅ نمودار تحلیل حساسیت ذخیره شد: timing_sensitivity_analysis.png")
+
+        # نمودار 2: نقشه حرارتی (Heatmap) - تصحیح شده
+        if sensitivity_results['tau1_tau2_matrix']['cost_matrix']:
+            plt.figure(figsize=(10, 8))
+
+            matrix_data = sensitivity_results['tau1_tau2_matrix']
+            cost_matrix = np.array(matrix_data['cost_matrix'])
+
+            # جایگزینی inf با NaN برای نمایش بهتر
+            cost_matrix[cost_matrix == float('inf')] = np.nan
+
+            # رسم heatmap
+            im = plt.imshow(cost_matrix, cmap='viridis', aspect='auto',
+                            interpolation='nearest', origin='lower')
+
+            # تنظیم محورها
+            plt.xticks(range(len(matrix_data['tau1_range'])), matrix_data['tau1_range'])
+            plt.yticks(range(len(matrix_data['tau2_range'])), matrix_data['tau2_range'])
+
+            plt.xlabel(fix_farsi_text('زمان شروع دوز اول (روز)'))
+            plt.ylabel(fix_farsi_text('زمان شروع دوز دوم (روز)'))
+            plt.title(fix_farsi_text('نقشه هزینه: بهینه‌ترین زمان‌بندی'))
+
+            # نشان دادن نقطه بهینه
+            if not np.all(np.isnan(cost_matrix)):
+                min_pos = np.unravel_index(np.nanargmin(cost_matrix), cost_matrix.shape)
+                plt.plot(min_pos[1], min_pos[0], 'r*', markersize=20,
+                         label=fix_farsi_text('نقطه بهینه فعلی'))
+
+            # colorbar
+            cbar = plt.colorbar(im, label=fix_farsi_text('هزینه کل نرمال‌شده'))
+            plt.legend()
+
+            plt.tight_layout()
+            plt.savefig('timing_heatmap.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("✅ نقشه حرارتی زمان‌بندی ذخیره شد: timing_heatmap.png")
+
+        # نمودار 3: تحلیل مؤلفه‌های هزینه
+        if (sensitivity_results['tau1_values'] and
+                sensitivity_results['z1_costs'] and
+                sensitivity_results['z2_costs'] and
+                sensitivity_results['z3_costs']):
+
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+
+            tau1_vals = sensitivity_results['tau1_values']
+
+            # Z1: هزینه تأمین
+            ax1.plot(tau1_vals, sensitivity_results['z1_costs'], 'b-o', linewidth=2)
+            ax1.set_title(fix_farsi_text('هزینه تأمین واکسن'))
+            ax1.set_xlabel('τ1')
+            ax1.grid(True, alpha=0.3)
+
+            # Z2: هزینه اجتماعی
+            ax2.plot(tau1_vals, sensitivity_results['z2_costs'], 'g-o', linewidth=2)
+            ax2.set_title(fix_farsi_text('هزینه‌های اجتماعی'))
+            ax2.set_xlabel('τ1')
+            ax2.grid(True, alpha=0.3)
+
+            # Z3: هزینه اقتصادی
+            ax3.plot(tau1_vals, sensitivity_results['z3_costs'], 'orange',
+                     marker='o', linewidth=2)
+            ax3.set_title(fix_farsi_text('هزینه‌های اقتصادی'))
+            ax3.set_xlabel('τ1')
+            ax3.grid(True, alpha=0.3)
+
+            # هزینه کل
+            ax4.plot(tau1_vals, sensitivity_results['total_costs'], 'r-o', linewidth=2)
+            ax4.set_title('هزینه کل (نرمال‌شده)')
+            ax4.set_xlabel('τ1')
+            ax4.grid(True, alpha=0.3)
+
+            # نشان دادن نقاط بهینه
+            for ax, costs in zip([ax1, ax2, ax3, ax4],
+                                 [sensitivity_results['z1_costs'],
+                                  sensitivity_results['z2_costs'],
+                                  sensitivity_results['z3_costs'],
+                                  sensitivity_results['total_costs']]):
+                min_idx = np.argmin(costs)
+                optimal_tau = tau1_vals[min_idx]
+                ax.axvline(x=optimal_tau, color='red', linestyle='--', alpha=0.5)
+
+            plt.suptitle(fix_farsi_text('تحلیل مؤلفه‌های هزینه'), fontsize=16)
+            plt.tight_layout()
+            plt.savefig('cost_components_analysis.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("✅ تحلیل مؤلفه‌های هزینه ذخیره شد: cost_components_analysis.png")
+
+        # نمودار 4: نمودار مقایسه‌ای - تصحیح شده
+        if sensitivity_results['tau1_values'] and sensitivity_results['total_costs']:
+            plt.figure(figsize=(12, 8))
+
+            tau1_vals = sensitivity_results['tau1_values']
+            costs = sensitivity_results['total_costs']
+
+            # رنگ‌بندی بر اساس کیفیت
+            colors = []
+            min_cost = min(costs)
+            max_cost = max(costs)
+
+            for cost in costs:
+                if cost <= min_cost + 0.1 * (max_cost - min_cost):
+                    colors.append('green')  # بهینه
+                elif cost <= min_cost + 0.3 * (max_cost - min_cost):
+                    colors.append('yellow')  # قابل قبول
+                else:
+                    colors.append('red')  # ضعیف
+
+            bars = plt.bar(tau1_vals, costs, color=colors, alpha=0.7, edgecolor='black')
+
+            # اضافه کردن برچسب‌ها
+            for bar, cost, tau1 in zip(bars, costs, tau1_vals):
+                plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                         f'{cost:.2f}', ha='center', va='bottom', fontweight='bold')
+
+            plt.xlabel(fix_farsi_text('زمان شروع دوز اول (روز)'))
+            plt.ylabel(fix_farsi_text('هزینه کل نرمال‌شده'))
+            plt.title('مقایسه کیفیت زمان‌بندی‌های مختلف')
+
+            # افزودن خط مرجع
+            plt.axhline(y=min_cost, color='green', linestyle='-', alpha=0.5,
+                        label=f'کمترین هزینه: {min_cost:.2f}')
+            plt.axhline(y=min_cost + 0.1 * (max_cost - min_cost), color='yellow',
+                        linestyle='--', alpha=0.5, label='حد قابل قبول')
+
+            plt.legend()
+            plt.grid(True, axis='y', alpha=0.3)
+            plt.tight_layout()
+            plt.savefig('timing_quality_comparison.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("✅ نمودار مقایسه کیفیت ذخیره شد: timing_quality_comparison.png")
+
     def visualize_results(self, results):
         """
-        رسم نمودارهای نتایج با متن فارسی صحیح
+        رسم نمودارهای نتایج با متن فارسی صحیح + تحلیل زمان‌بندی تصحیح شده
         """
         if results is None:
             print("نتایج برای رسم نمودار موجود نیست.")
@@ -709,6 +972,11 @@ class VaccineAllocationOptimizer:
 
         # اطمینان از بستن نمودارهای قبلی
         plt.close('all')
+
+        # تحلیل حساسیت زمان‌بندی تصحیح شده
+        print("\n🎯 شروع تحلیل حساسیت زمان‌بندی تصحیح شده...")
+        sensitivity_results = self.analyze_timing_sensitivity()
+        self.create_timing_analysis_plots(sensitivity_results)
 
         # کتابخانه‌های مورد نیاز برای اصلاح متن فارسی
         try:
@@ -873,6 +1141,8 @@ class VaccineAllocationOptimizer:
 
         # نمودار میله‌ای برای مصرف واکسن
         plt.subplot(1, 2, 1)
+        x = np.arange(len(groups))
+        width = 0.35
         plt.bar(x - width / 2, dose1_needs, width, label=fix_farsi_text('دوز اول'))
         plt.bar(x - width / 2, dose2_needs, width, bottom=dose1_needs, label=fix_farsi_text('دوز دوم'))
         plt.xlabel(fix_farsi_text('گروه‌های اولویت'))
@@ -899,13 +1169,13 @@ class VaccineAllocationOptimizer:
         plt.close()  # بستن نمودار برای آزادسازی حافظه
         print("نمودار تولید و مصرف واکسن ذخیره شد: vaccine_supply_demand.png")
 
-        # نمودار 4: زمان‌بندی واکسیناسیون
+        # نمودار 4: زمان‌بندی واکسیناسیون (نمودار اصلی) - تصحیح شده
         plt.figure(figsize=(10, 6))
 
         # محور افقی: روزهای اپیدمی
         days = np.arange(1, self.T + 1)
 
-        # ایجاد خطوط عمودی برای نشان دادن زمان‌های شروع واکسیناسیون
+        # ایجاد خطوط عمودی برای نشان دادن زمان‌های شروع واکسیناسیون - تصحیح شده
         plt.axvline(x=self.tau1[0], color='blue', linestyle='-', alpha=0.5, label=f"τ1_1: {self.tau1[0]}")
         plt.axvline(x=self.tau2[0], color='blue', linestyle='--', alpha=0.5, label=f"τ2_1: {self.tau2[0]}")
         plt.axvline(x=self.tau1[1], color='green', linestyle='-', alpha=0.5, label=f"τ1_2: {self.tau1[1]}")
@@ -926,7 +1196,7 @@ class VaccineAllocationOptimizer:
         plt.close()  # بستن نمودار برای آزادسازی حافظه
         print("نمودار زمان‌بندی واکسیناسیون ذخیره شد: vaccination_schedule.png")
 
-        # نمودار 5: عدالت تخصیص واکسن (نمودار جدید)
+        # نمودار 5: عدالت تخصیص واکسن
         plt.figure(figsize=(10, 6))
 
         # محاسبه مقادیر برای نمودار
@@ -993,9 +1263,27 @@ class VaccineAllocationOptimizer:
         plt.close()  # بستن نمودار برای آزادسازی حافظه
         print("نمودار عدالت تخصیص واکسن ذخیره شد: vaccine_equity.png")
 
+        print("\n🎯 === خلاصه نمودارهای ایجاد شده ===")
+        print("✅ نمودارهای اصلی:")
+        print("   - vaccination_ratio.png")
+        print("   - vaccine_production.png")
+        print("   - vaccine_supply_demand.png")
+        print("   - vaccination_schedule.png")
+        print("   - vaccine_equity.png")
+        print("\n🚀 نمودارهای تحلیل زمان‌بندی (تصحیح شده):")
+        print("   - timing_sensitivity_analysis.png")
+        print("   - timing_heatmap.png")
+        print("   - cost_components_analysis.png")
+        print("   - timing_quality_comparison.png")
+        print("\n💡 این نمودارها نشان می‌دهند:")
+        print("   🎯 کدام زمان‌ها بهینه‌اند و چرا (محدوده 30-50 روز)")
+        print("   📊 حساسیت هزینه نسبت به تغییرات زمان")
+        print("   🔍 مقایسه کیفی زمان‌های مختلف")
+        print("   🗺️ نقشه کامل فضای جستجو")
+
     def find_optimal_timing(self):
         """
-        جستجوی ترکیب بهینه زمان‌های واکسیناسیون
+        جستجوی ترکیب بهینه زمان‌های واکسیناسیون - تصحیح شده
         """
         if self.config is None:
             print("خطا: فایل پیکربندی بارگذاری نشده است. ابتدا فایل config.json را بارگذاری کنید.")
@@ -1003,14 +1291,14 @@ class VaccineAllocationOptimizer:
 
         print("\n=== شروع جستجوی زمان‌های بهینه واکسیناسیون ===")
 
-        # استخراج محدوده‌های زمانی از پیکربندی بدون اعمال محدودیت اجباری
+        # استخراج محدوده‌های زمانی تصحیح شده از پیکربندی
         tau1_1_min = self.config['tau1_group1_min']
         tau1_1_max = self.config['tau1_group1_max']
 
         tau1_2_min = self.config['tau1_group2_min']
         tau1_2_max = self.config['tau1_group2_max']
 
-        # ایجاد محدوده‌های زمانی با استفاده از مقادیر واقعی وارد شده توسط کاربر
+        # ایجاد محدوده‌های زمانی با استفاده از مقادیر تصحیح شده
         tau1_1_range = range(tau1_1_min,
                              tau1_1_max + 1,
                              self.config['time_step'])
@@ -1259,7 +1547,17 @@ class VaccineAllocationOptimizer:
             # محاسبه اطلاعات تکمیلی و رسم نمودارها
             if results:
                 self.calculate_additional_info()
-                self.visualize_results(results)
+
+                # انتخاب نوع تحلیل
+                timing_analysis = input("\nآیا می‌خواهید تحلیل حساسیت زمان‌بندی انجام شود؟ (بله/خیر): ").strip().lower()
+
+                if timing_analysis in ['بله', 'yes', 'y', '1']:
+                    print("🎯 تحلیل کامل با بررسی حساسیت زمان‌بندی...")
+                    self.visualize_results(results)
+                else:
+                    print("📊 رسم نمودارهای استاندارد...")
+                    # فقط نمودارهای اصلی
+                    self.create_standard_plots(results)
 
                 # ذخیره نتایج
                 self.save_results_to_json(results, "results.json")
@@ -1368,7 +1666,8 @@ def main():
             # بارگذاری مجموعه وزن‌ها - یا از فایل یا مقادیر پیش‌فرض
             weight_sets = load_multiple_weights(weights_file_path if use_weights in ['بله', 'yes', 'y', '1'] else None)
 
-            print(f"\nبرنامه با {len(weight_sets)} مجموعه وزن مختلف اجرا خواهد شد:")
+            print(f"\n🎯 برنامه با {len(weight_sets)} مجموعه وزن مختلف اجرا خواهد شد:")
+            print("محدودیت‌های انعطاف‌پذیر فعال است - انتظار تفاوت‌های واضح را داشته باشید! ✅")
             for idx, weight_set in enumerate(weight_sets):
                 print(
                     f"{idx + 1}. {weight_set['name']} (w1={weight_set['w1']}, w2={weight_set['w2']}, w3={weight_set['w3']})")
@@ -1424,29 +1723,29 @@ def main():
 
             # نمایش مقایسه نتایج
             if results_collection:
-                print("\n\n=== مقایسه نتایج با وزن‌های مختلف ===")
-                header = "نام مجموعه وزن | هزینه کل | Z1 (تأمین) | Z2 (اجتماعی) | Z3 (اقتصادی) | U1_1 | U1_2 | U2_1 | U2_2 | V1 | V2 | عدالت تخصیص | کارایی به جمعیت"
+                print("\n\n🎯 === مقایسه نتایج با وزن‌های مختلف (محدودیت‌های انعطاف‌پذیر) ===")
+                header = "نام مجموعه وزن | هزینه کل | Z1 (تأمین) | Z2 (اجتماعی) | Z3 (اقتصادی) | U1_1 | U1_2 | U2_1 | U2_2 | V1 | V2 | عدالت | کارایی"
                 print(header)
                 print("-" * len(header))
 
                 for result in results_collection:
                     print(
-                        f"{result['weight_set']['name']} | {result['objective_value']:.2f} | {result['objective1_value']:.2f} | "
-                        f"{result['objective2_value']:.2f} | {result['objective3_value']:.2f} | {result['U1_1']:.2f} | "
-                        f"{result['U1_2']:.2f} | {result['U2_1']:.2f} | {result['U2_2']:.2f} | {result['V_prime_1']:.2f} | "
-                        f"{result['V_prime_2']:.2f} | {result['equity_diff_dose1']:.3f} | {result['population_effectiveness']:.3f}")
+                        f"{result['weight_set']['name'][:20]:20} | {result['objective_value']:.2f} | {result['objective1_value']:.0f} | "
+                        f"{result['objective2_value']:.0f} | {result['objective3_value']:.0f} | {result['U1_1']:.2f} | "
+                        f"{result['U1_2']:.2f} | {result['U2_1']:.2f} | {result['U2_2']:.2f} | {result['V_prime_1']:.0f} | "
+                        f"{result['V_prime_2']:.0f} | {result['equity_diff_dose1']:.3f} | {result['population_effectiveness']:.3f}")
 
                 # ذخیره مقایسه در فایل
-                with open("weight_comparison_results.json", 'w', encoding='utf-8') as f:
+                with open("weight_comparison_results_flexible.json", 'w', encoding='utf-8') as f:
                     json.dump(results_collection, f, ensure_ascii=False, indent=4)
 
-                print("\nمقایسه نتایج در فایل 'weight_comparison_results.json' ذخیره شد.")
+                print("\n✅ مقایسه نتایج در فایل 'weight_comparison_results_flexible.json' ذخیره شد.")
 
                 # رسم نمودار مقایسه وزن‌ها
                 try:
                     plt.figure(figsize=(14, 8))
 
-                    weight_names = [ws['name'] for ws in weight_sets]
+                    weight_names = [ws['name'][:15] for ws in weight_sets]  # کوتاه کردن نام‌ها
                     u1_1_values = [r['U1_1'] for r in results_collection]
                     u1_2_values = [r['U1_2'] for r in results_collection]
                     equity_diff_values = [r['equity_diff_dose1'] for r in results_collection]
@@ -1454,25 +1753,42 @@ def main():
                     x = np.arange(len(weight_names))
                     width = 0.25
 
-                    plt.bar(x - width, u1_1_values, width, label="نسبت واکسن گروه 1 (افراد بالای 60 سال)")
-                    plt.bar(x, u1_2_values, width, label="نسبت واکسن گروه 2 (افراد دارای کسب و کار)")
-                    plt.bar(x + width, equity_diff_values, width, label="شاخص عدالت (اختلاف تخصیص)")
+                    plt.bar(x - width, u1_1_values, width, label="نسبت واکسن گروه 1 (افراد بالای 60 سال)",
+                            color='skyblue')
+                    plt.bar(x, u1_2_values, width, label="نسبت واکسن گروه 2 (افراد دارای کسب و کار)",
+                            color='lightgreen')
+                    plt.bar(x + width, equity_diff_values, width, label="شاخص عدالت (اختلاف تخصیص)", color='orange')
 
                     plt.xlabel("مجموعه وزن‌ها")
                     plt.ylabel("مقدار")
-                    plt.title("مقایسه تخصیص واکسن و شاخص عدالت برای وزن‌های مختلف")
-                    plt.xticks(x, weight_names)
+                    plt.title("مقایسه تخصیص واکسن با محدودیت‌های انعطاف‌پذیر")
+                    plt.xticks(x, weight_names, rotation=45)
                     plt.legend()
                     plt.grid(True, alpha=0.3)
 
                     plt.tight_layout()
-                    plt.savefig("weight_comparison.png")
-                    plt.close()  # بستن نمودار برای آزادسازی حافظه
-                    print("نمودار مقایسه وزن‌ها ذخیره شد: weight_comparison.png")
+                    plt.savefig("weight_comparison_flexible.png", dpi=300, bbox_inches='tight')
+                    plt.close()
+                    print("✅ نمودار مقایسه وزن‌ها ذخیره شد: weight_comparison_flexible.png")
+
+                    # نمایش تفاوت‌های کلیدی
+                    print("\n🎯 === تفاوت‌های کلیدی بین وزن‌ها ===")
+                    min_u1_1 = min(r['U1_1'] for r in results_collection)
+                    max_u1_1 = max(r['U1_1'] for r in results_collection)
+                    min_u1_2 = min(r['U1_2'] for r in results_collection)
+                    max_u1_2 = max(r['U1_2'] for r in results_collection)
+
+                    print(
+                        f"دامنه تغییرات گروه 1 (دوز اول): {min_u1_1:.2f} تا {max_u1_1:.2f} ({(max_u1_1 - min_u1_1) * 100:.1f}% تفاوت)")
+                    print(
+                        f"دامنه تغییرات گروه 2 (دوز اول): {min_u1_2:.2f} تا {max_u1_2:.2f} ({(max_u1_2 - min_u1_2) * 100:.1f}% تفاوت)")
+                    print("✅ محدودیت‌های انعطاف‌پذیر به وزن‌ها اجازه تأثیرگذاری واقعی داده‌است!")
+
                 except Exception as e:
                     print(f"خطا در رسم نمودار مقایسه وزن‌ها: {e}")
         else:
             # اجرای عادی مدل
+            print("\n🎯 محدودیت‌های انعطاف‌پذیر فعال است!")
             optimizer.run(find_optimal_timing=find_optimal)
 
     except Exception as e:

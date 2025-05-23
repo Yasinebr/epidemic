@@ -1,11 +1,12 @@
 {
-  "tau1_group1_min": 10,
-  "tau1_group1_max": 20,
-  "tau1_group2_min": 10,
-  "tau1_group2_max": 20,
-  "gap_group1_min": 21,
-  "gap_group1_max": 28,
-  "gap_group2_min": 14,
-  "gap_group2_max": 18,
-  "time_step": 2
+  "tau1_group1_min": 30,
+  "tau1_group1_max": 50,
+  "tau1_group2_min": 30,
+  "tau1_group2_max": 50,
+  "gap_group1_min": 45,
+  "gap_group1_max": 75,
+  "gap_group2_min": 45,
+  "gap_group2_max": 75,
+  "time_step": 5,
+  "_comment": "تصحیح شده - حداقل 30 روز برای تولید واکسن، فاصله 45-75 روز بین دوزها"
 }
